@@ -1,0 +1,67 @@
+name: Quality gates
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install "./autonoma-agent[test]" ruff
+      - run: ruff check autonoma-agent/autonoma autonoma-agent/tests --select F
+      - run: python -m compileall -q autonoma-agent/autonoma
+      - run: python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch --cov-report=term-missing
+      - run: autonoma --version
+  locked-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --require-hashes -r autonoma-agent/requirements-lock.txt
+      - run: python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch --cov-fail-under=60
+      - run: python -m pip install pip-audit build
+      - run: pip-audit --require-hashes -r autonoma-agent/requirements-lock.txt
+      - run: python -m build autonoma-agent
+  windows-executable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install "./autonoma-agent[build,keyboard,test]"
+      - run: python -m pytest autonoma-agent/tests/test_windows_readiness.py -q
+      - name: Build Windows console executable
+        working-directory: autonoma-agent
+        run: python -m PyInstaller --noconfirm --clean autonoma.spec
+      - name: Smoke test executable without credentials
+        working-directory: autonoma-agent
+        shell: pwsh
+        run: |
+          $env:AUTONOMA_HOME = Join-Path $env:RUNNER_TEMP 'autonoma-smoke'
+          & .\dist\Autonoma.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Version smoke test failed' }
+          $raw = & .\dist\Autonoma.exe --doctor --json
+          if ($LASTEXITCODE -ne 0) { throw 'Doctor smoke test failed' }
+          $report = ($raw -join "`n") | ConvertFrom-Json
+          if (-not $report.local_checks_passed) { throw 'Local checks failed' }
+          if ($report.network_tested) { throw 'Offline smoke test must not contact providers' }
+          $hash = (Get-FileHash .\dist\Autonoma.exe -Algorithm SHA256).Hash
+          "$hash  Autonoma.exe" | Set-Content .\dist\Autonoma.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Autonoma-Windows-unsigned
+          path: |
+            autonoma-agent/dist/Autonoma.exe
+            autonoma-agent/dist/Autonoma.exe.sha256
+          if-no-files-found: error

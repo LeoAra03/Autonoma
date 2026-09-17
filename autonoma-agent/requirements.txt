@@ -1,0 +1,6 @@
+# Instalación base; para extras usa pip install ".[keyboard,browser,build]".
+httpx>=0.27,<1
+rich>=13.7,<15
+beautifulsoup4>=4.12,<5
+lxml>=5.2,<7
+psutil>=6,<8
