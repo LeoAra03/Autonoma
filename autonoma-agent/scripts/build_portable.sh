@@ -7,13 +7,22 @@
 #                             Python >= 3.10 (`python autonoma.pyz`), sin dependencias
 #                             instaladas en el destino salvo httpx/rich/bs4/lxml/psutil.
 #
-# Uso:  scripts/build_portable.sh [--skip-smoke]
+# Uso:  scripts/build_portable.sh [--skip-smoke] [--zipapp]
+#   --skip-smoke  no ejecuta pruebas ni autoensayos (rápido, para CI que ya los corrió)
+#   --zipapp      fuerza el zipapp universal, saltando PyInstaller
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ROOT="$PWD"
 PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
 SKIP_SMOKE=0
-[[ "${1:-}" == "--skip-smoke" ]] && SKIP_SMOKE=1
+ZIPAPP_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-smoke) SKIP_SMOKE=1 ;;
+    --zipapp) ZIPAPP_ONLY=1 ;;
+    *) echo "aviso: argumento ignorado: $arg" >&2 ;;
+  esac
+done
 
 build_zipapp() {
   echo "-- construyendo zipapp portable (dist/autonoma.pyz)"
@@ -37,8 +46,20 @@ PYMAIN
 }
 
 if [[ "$SKIP_SMOKE" == "0" ]]; then
-  echo "-- verificación previa: suite de pruebas"
-  "$PY" -m pytest -q tests > /dev/null
+  if "$PY" -c 'import pytest' >/dev/null 2>&1; then
+    echo "-- verificación previa: suite de pruebas"
+    "$PY" -m pytest -q tests
+  else
+    # Falta el extra [test]: advertir, no abortar — construir el paquete no lo necesita.
+    echo "aviso: sin pytest en $PY; se omite la verificación previa (pip install \".[test]\")" >&2
+  fi
+fi
+
+mkdir -p dist build
+if [[ "$ZIPAPP_ONLY" == "1" ]]; then
+  echo "-- zipapp forzado"
+  build_zipapp
+  exit 0
 fi
 
 echo "-- PyInstaller (onefile)"

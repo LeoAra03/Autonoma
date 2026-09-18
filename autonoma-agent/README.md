@@ -22,7 +22,8 @@ Para un artefacto portable (un solo archivo, sin Python instalado en el destino)
 
 ```powershell
 # Windows → dist\Autonoma.exe
-powershell -ExecutionPolicy Bypass -File autonoma-agent\scripts\build_windows.ps1 -OneFile
+powershell -ExecutionPolicy Bypass -File autonoma-agent\scripts\build_windows.ps1
+# (-SkipSmoke omite el autoensayo; el binario siempre se construye onefile)
 ```
 
 ```bash

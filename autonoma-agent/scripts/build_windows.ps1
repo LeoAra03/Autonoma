@@ -16,8 +16,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-Set-Location (Join-Path $PSScriptRoot "..")
-$root = (Get-Location).Path
+# Scripts/build_windows.ps1 vive en autonoma-agent/scripts: el repositorio está dos niveles arriba.
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$agent = Join-Path $repo "autonoma-agent"
+if (-not (Test-Path (Join-Path $agent "pyproject.toml"))) { throw "no se encontró autonoma-agent/pyproject.toml en $repo" }
+Set-Location $repo
+$root = $repo
 Write-Host "== Autonoma: build Windows (onefile) en $root"
 
 $venv = Join-Path $root ".venv-build"
@@ -31,12 +35,12 @@ Write-Host "-- Instalando dependencias de construcción"
 & $py -m pip install --upgrade pip | Out-Null
 & $py -m pip install "./autonoma-agent[build,keyboard]"
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "   pynput falló; reintentando sin el extra keyboard"
+    Write-Host "   pynput falló; reintentando sin el extra keyboard (el hotkey global es opcional)"
     & $py -m pip install "./autonoma-agent[build]"
     if ($LASTEXITCODE -ne 0) { throw "Fallo instalando el paquete" }
 }
-# El paquete se instala desde la raíz del repo; si ya estaba, se refuerza la edición local.
-Push-Location autonoma-agent
+# El paquete se instala desde la raíz del repo; se compila dentro de autonoma-agent.
+Push-Location $agent
 try {
     Write-Host "-- PyInstaller"
     & $py -m PyInstaller --noconfirm --clean autonoma.spec

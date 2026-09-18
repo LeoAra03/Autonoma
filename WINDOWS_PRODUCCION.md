@@ -105,7 +105,7 @@ autonoma-agent\dist\Autonoma.exe --selftest --json
 Devuelve `ok`, `frozen`, `checks[]` (import de todos los módulos del paquete, raíz de datos
 escribible, presencia de dependencias, `pynput` como advertencia opcional) y
 `local_checks_passed`. `network_tested=false` es intencional: el autoensayo nunca llama a
-proveedores. Los scripts `autonoma-agent/scripts/build_windows.ps1` (OneFile) y
+proveedores. Los scripts `autonoma-agent/scripts/build_windows.ps1` (onefile; `-SkipSmoke` para omitir el ensayo) y
 `build_portable.sh` (PyInstaller o zipapp como fallback) ejecutan ese autoensayo sobre el
 artefacto antes de darlo por bueno y publican un `.sha256`. CI construye el `.exe` en la job
 `windows-executable` y lo sube a un Release cuando se etique `v*`; el binario **no** está
