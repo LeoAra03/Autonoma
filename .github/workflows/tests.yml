@@ -47,9 +47,10 @@ jobs:
           code="${PIPESTATUS[0]}"
           set -e
           if [ "$code" -ne 0 ]; then
-            fails=$(grep -E "^(FAILED|ERROR)" /tmp/pytest.log | head -25 | tr '\n' ' ' || true)
-            echo "::error::pytest exit=$code :: ${fails:-sin FAILED/ERROR visibles (revisar umbral de cobertura)}"
-            grep -E "Required test coverage| TOTAL " /tmp/pytest.log | tail -3 | sed 's/^/::warning::/' || true
+            fails=$(grep -E "^(FAILED|ERROR)" /tmp/pytest.log | head -12 | tr '\n' '|' || true)
+            tail=$(tail -c 1200 /tmp/pytest.log | tr '\r\n' '  ' || true)
+            echo "::error::pytest exit=$code :: ${fails:-sin FAILED/ERROR en el resumen; cola del log abajo}"
+            echo "::error::log tail :: $tail"
           fi
           exit "$code"
       - run: autonoma --version
