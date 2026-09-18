@@ -22,9 +22,15 @@ jobs:
       - name: Tipos (mypy --strict, desde la config del proyecto)
         working-directory: autonoma-agent
         run: mypy autonoma
+      - name: Tipos para Windows (mypy --platform win32)
+        # Caza atributos que sólo existen en un SO (os.killpg, ctypes.windll) antes de
+        # que aparezcan como errores opacos en el job de Windows.
+        if: runner.os == 'Linux'
+        working-directory: autonoma-agent
+        run: mypy --platform win32 autonoma
       - name: Empaquetado (la versión se resuelve desde autonoma/_version.py)
         working-directory: autonoma-agent
-        run: python -m pip install --quiet build && python -m build --wheel --no-isolation --outdir /tmp/wheel . && python -c "import zipfile,glob; n=glob.glob('/tmp/wheel/*.whl')[0]; print(n.split('/')[-1])"
+        run: python -m pip install --quiet build && python -m build --wheel --outdir dist-ci . && python -c "import glob,zipfile; n=sorted(glob.glob('dist-ci/*.whl'))[0]; zf=zipfile.ZipFile(n); print(n.split('/')[-1]); assert 'autonoma/py.typed' in zf.namelist(); assert b'__version__' in zf.read('autonoma/_version.py')"
       - run: python -m compileall -q -o 2 autonoma-agent/autonoma
       - run: python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch --cov-report=term-missing
       - run: autonoma --version

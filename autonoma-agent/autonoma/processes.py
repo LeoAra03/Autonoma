@@ -223,7 +223,11 @@ class ProcessSupervisor:
             "shell": shell,
         }
         if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            # El símbolo sólo existe en Windows; se resuelve por atributo para que el
+            # chequeo tipado multiplataforma no dependa de constantes ausentes.
+            new_group: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if new_group:
+                kwargs["creationflags"] = new_group
         else:
             kwargs["start_new_session"] = True
         try:
@@ -312,12 +316,25 @@ def terminate_process(process: subprocess.Popen[str]) -> None:
     if os.name == "nt":
         _kill_windows_tree(process)
         return
+    killpg = getattr(os, "killpg", None)
+    getpgid = getattr(os, "getpgid", None)
+    if killpg is None or getpgid is None:  # plataforma sin grupos de procesos
+        with contextlib.suppress(OSError):
+            process.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_TERM_GRACE_SECONDS)
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.kill()
+        return
+    # SIGKILL puede no estar definido fuera de POSIX; SIGTERM es el fallback razonable.
+    sigkill: int = getattr(signal, "SIGKILL", signal.SIGTERM)
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        killpg(getpgid(process.pid), signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
         process.wait(timeout=_TERM_GRACE_SECONDS)
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        killpg(getpgid(process.pid), sigkill)
     if process.poll() is None:
         with contextlib.suppress(OSError):
             process.kill()

@@ -135,12 +135,26 @@ def _root_payload(data_root: DataRoot | Path | None) -> dict[str, Any] | None:
 
 
 def is_elevated() -> bool | None:
-    """`None` cuando la plataforma no permite determinarlo: no se afirma sin evidencia."""
+    """`None` cuando la plataforma no permite determinarlo: no se afirma sin evidencia.
+
+    Los accesos van por `getattr` porque `ctypes.windll` existe sólo en Windows y
+    `os.geteuid` sólo en POSIX; así el chequeo tipado pasa en ambas plataformas y las
+    pruebas pueden sustituir la llamada real.
+    """
+    if os.name == "nt":
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return None
+        try:
+            return bool(windll.shell32.IsUserAnAdmin())
+        except (AttributeError, OSError):
+            return None
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return None
     try:
-        if os.name == "nt":
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
-        return os.geteuid() == 0
-    except (AttributeError, OSError):
+        return bool(geteuid() == 0)
+    except OSError:
         return None
 
 

@@ -11,6 +11,7 @@ Decisiones que importan:
 """
 
 import os
+import tempfile
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -63,27 +64,59 @@ icon = ROOT / "assets" / "autonoma.ico"
 exe = None
 
 
+def _version_tuple(text: str) -> tuple[int, int, int, int]:
+    """`2.0.0rc1` -> (2, 0, 0, 0): Windows exige cuatro enteros en FixedFileInfo."""
+    parts: list[int] = []
+    for chunk in text.replace("-", ".").split("."):
+        digits = ""
+        for char in chunk:
+            if not char.isdigit():
+                break
+            digits += char
+        parts.append(int(digits) if digits else 0)
+    parts += [0] * (4 - len(parts))
+    return tuple(parts[:4])  # type: ignore[return-value]
+
+
 def _windows_version_info() -> str | None:
-    """Metadatos del .exe (versión, derechos, nombres): visibles en Propiedades."""
+    """Archivo de `VSVersionInfo` en el formato que PyInstaller `eval()` (no JSON).
+
+    Si algo falla se devuelve `None`: el ejecutable sigue construyéndose, sólo pierde
+    las propiedades visibles en el Explorador. Nunca debe tumbar el build.
+    """
     if os.name != "nt":
         return None
-    payload = (
-        "{"
-        '"FileVersion": "%s",'
-        '"FileDescription": "Autonoma — agente local de terminal",'
-        '"ProductName": "Autonoma",'
-        '"ProductVersion": "%s",'
-        '"LegalCopyright": "Uso personal",'
-        '"OriginalFilename": "Autonoma.exe",'
-        '"CompanyName": "",'
-        '"LegalTrademarks": "",'
-        '"Comments": "Consola; aprobación humana por operación"'
-        "}"
-    ) % (__version__, __version__)
-    target = ROOT / "build" / "version_info.txt"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(payload, encoding="utf-8")
-    return str(target)
+    try:
+        numeric = _version_tuple(__version__)
+        pairs = [
+            ("CompanyName", ""),
+            ("FileDescription", "Autonoma - agente local de terminal"),
+            ("FileVersion", __version__),
+            ("InternalName", "autonoma"),
+            ("LegalCopyright", "Uso personal"),
+            ("LegalTrademarks", ""),
+            ("OriginalFilename", "Autonoma.exe"),
+            ("ProductName", "Autonoma"),
+            ("ProductVersion", __version__),
+            ("Comments", "Consola; aprobacion humana por operacion"),
+        ]
+        structs = ",\n        ".join(f"StringStruct({name!r}, {value!r})" for name, value in pairs)
+        payload = (
+            f"VSVersionInfo(\n"
+            f"  ffi=FixedFileInfo(filevers={numeric}, prodvers={numeric}, mask=0x3f, "
+            f"flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),\n"
+            f"  kids=[\n"
+            f"    StringFileInfo([StringTable('040904B0', [\n        {structs}\n      ])]),\n"
+            f"    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n"
+            f"  ]\n)"
+        )
+        compile(payload, "<version_info>", "eval")  # sólo una expresión, sin comentarios
+        target = Path(tempfile.gettempdir()) / "autonoma_version_info.txt"
+        target.write_text(payload, encoding="ascii")
+        return str(target)
+    except Exception as exc:  # noqa: BLE001 - el metadato no puede romper el empaquetado
+        print(f"AVISO: sin versión de Windows en el .exe ({exc!r})")
+        return None
 
 
 version_file = _windows_version_info()
