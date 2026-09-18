@@ -97,7 +97,12 @@ def probe_python(argv: Sequence[str]) -> str | None:
     code = PROBE % (MIN_PYTHON[0], MIN_PYTHON[1])
     try:
         done = subprocess.run(  # noqa: S603 - intérprete descubierto en el PATH, ejecutado con -c de confianza
-            [*argv, "-c", code], capture_output=True, text=True, timeout=25, check=False
+            [*argv, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+            stdin=subprocess.DEVNULL,  # sin consola heredada: un lanzador que espere stdin bloquea el arranque
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -125,8 +130,29 @@ def python_candidates(explicit: str | None, *, windows: bool | None = None) -> l
     return out
 
 
+def current_python(*, version: tuple[int, ...] | None = None, executable: str | None = None) -> tuple[list[str], str] | None:
+    """El intérprete que ya nos está ejecutando, si cumple; `None` si no sirve.
+
+    Se resuelve dentro del proceso, sin lanzar nada: cuando `bootstrap.py` ya corre sobre un
+    Python válido no hay nada que descubrir en el PATH, y así se esquiva el sondeo que en
+    Windows tropieza con el stub de la Tienda o con `py.exe`, cuyo hijo sobrevive al lanzador
+    y deja la tubería abierta. Seam con argumentos: las pruebas no retocan `sys`.
+    """
+    effective = tuple(version if version is not None else sys.version_info[:3])
+    path = executable if executable is not None else sys.executable
+    if effective[:2] < MIN_PYTHON or not path:
+        return None
+    if not Path(path).is_file():
+        return None
+    return [path], ".".join(str(part) for part in effective[:3])
+
+
 def find_python(explicit: str | None = None) -> tuple[list[str], str]:
     """Primer Python 3.10+ utilizable, con su versión ya leída."""
+    if not explicit:
+        current = current_python()
+        if current is not None:
+            return current
     for argv in python_candidates(explicit, windows=None):
         version = probe_python(argv)
         if version:

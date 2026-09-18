@@ -63,9 +63,12 @@ jobs:
             # job `locked-linux`, donde el árbol completo es alcanzable.
             floor="--cov-fail-under=0"
           fi
+          # Sin `| tee`: si un test deja un hijo huérfano con la tubería abierta, `tee` no ve
+          # el EOF y el paso se queda colgado para siempre, más allá de cualquier cota.
           timeout 900 python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch \
-            --cov-report=term-missing --timeout=120 $floor 2>&1 | tee /tmp/pytest.log
-          code="${PIPESTATUS[0]}"
+            --cov-report=term-missing --timeout=120 $floor > /tmp/pytest.log 2>&1
+          code="$?"
+          cat /tmp/pytest.log
           set -e
           if [ "$code" -ne 0 ]; then
             fails=$(grep -E "^(FAILED|ERROR)" /tmp/pytest.log | head -12 | tr '\n' '|' || true)

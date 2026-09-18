@@ -47,8 +47,30 @@ def test_setup_uses_the_interpreter_named_by_the_environment(monkeypatch: pytest
     assert asked == ["/opt/py/bin/python"]
 
 
+def test_a_good_current_interpreter_needs_no_probing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con un Python que ya cumple en marcha, `find_python` no lanza ni un subprocess."""
+
+    def explode(*argv, **kwargs):
+        raise AssertionError("no hay nada que sondear: el intérprete en curso vale")
+
+    monkeypatch.delenv("AUTONOMA_PYTHON", raising=False)
+    monkeypatch.setattr(bootstrap.subprocess, "run", explode)
+    argv, version = bootstrap.find_python()
+    if sys.version_info[:2] >= bootstrap.MIN_PYTHON:
+        assert argv == [sys.executable]
+        assert version == ".".join(str(part) for part in sys.version_info[:3])
+
+
+def test_current_python_only_vets_what_is_already_running() -> None:
+    assert bootstrap.current_python(version=(3, 12, 1), executable=sys.executable) == ([sys.executable], "3.12.1")
+    assert bootstrap.current_python(version=(3, 9, 18), executable=sys.executable) is None  # viejo
+    assert bootstrap.current_python(version=(3, 12, 0), executable="") is None  # pythonw/congelado
+    assert bootstrap.current_python(version=(3, 12, 0), executable="/no-existe/python") is None
+
+
 def test_find_python_reports_an_actionable_message_when_nothing_qualifies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTONOMA_PYTHON", raising=False)
+    monkeypatch.setattr(bootstrap, "current_python", lambda **kwargs: None)
     monkeypatch.setattr(
         bootstrap, "python_candidates", lambda explicit, *, windows=None: [[sys.executable, "--no-such-flag"]]
     )
