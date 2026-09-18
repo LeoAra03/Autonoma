@@ -7,6 +7,7 @@ de alguien con un PATH raro.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -380,4 +381,7 @@ def test_status_is_json_ready_and_exit_code_says_if_instalar(
     )
     assert bootstrap.print_status(tmp_path) == 1  # "falta instalar" también es un estado útil
     out = capsys.readouterr().out
-    assert '"installed": false' in out and str(tmp_path) in out
+    assert '"installed": false' in out
+    # La ruta se compara tras parsear el JSON: en Windows el JSON escapa las barras
+    # invertidas y buscar `str(tmp_path)` como subcadena sería un falso negativo.
+    assert json.loads(out)["venv"] == str(tmp_path)

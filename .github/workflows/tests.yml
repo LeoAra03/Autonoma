@@ -57,7 +57,8 @@ jobs:
           code="$?"
           cat /tmp/new.log
           if [ "$code" -ne 0 ]; then
-            echo "::error::pruebas nuevas exit=$code (124 = colgado; último nombre del log = test sospechoso) :: $(tail -c 900 /tmp/new.log | tr '\r\n' '  ')"
+            fails=$(grep -E "^(FAILED|ERROR)" /tmp/new.log | head -8 | cut -c1-90 | tr '\n' '|' || true)
+            echo "::error::pruebas nuevas exit=$code (124 = colgado) :: ${fails:-$(tail -c 900 /tmp/new.log | tr '\r\n' '  ')}"
           fi
           exit "$code"
       - name: "Pruebas (puerta de cobertura dura en Linux; medida en Windows)"

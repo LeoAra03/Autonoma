@@ -94,7 +94,10 @@ def test_posix_launcher_uses_the_bootstrap_and_honours_python_overrides() -> Non
     assert "AUTONOMA_PYTHON" in text
     assert '"$BOOT" run' in text
     assert "scripts/bootstrap.py" in text
-    assert (REPO_ROOT / "run-autonoma.sh").stat().st_mode & 0o111
+    if os.name != "nt":
+        # NTFS no tiene bit de ejecución: allí el lanzador que la gente doble-clickeá es
+        # `Run-Autonoma.bat`, y comprobar el modo del `.sh` sólo daría un falso negativo.
+        assert (REPO_ROOT / "run-autonoma.sh").stat().st_mode & 0o111
 
 
 @pytest.mark.skipif(shutil.which("sh") is None or os.name == "nt", reason="sin sh POSIX")
