@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -67,25 +68,54 @@ def test_privileges_and_host_checks_come_first(tmp_path: Path) -> None:
     assert {"notrack_key", "notrack_url", "data_directory", "dependencies"} <= set(names)
 
 
-def test_unwritable_data_root_is_reported_as_error(tmp_path: Path) -> None:
-    """Una raíz sin escritura debe fallar el diagnóstico con un mensaje accionable."""
+def _root_that_cannot_be_created(tmp_path: Path) -> Path:
+    """Raíz inutilizable en cualquier SO: el padre es un archivo regular.
+
+    Sustituye a `chmod 0o500` (en Windows el atributo de sólo-lectura no impide escribir
+    en un directorio) y a rutas tipo `/proc` (no existen fuera de Linux): el fallo de
+    `mkdir` es idéntico en POSIX y NTFS.
+    """
+    occupied = tmp_path / "ocupado"
+    occupied.write_text("esto es un archivo, no un directorio", encoding="utf-8")
+    return occupied / "autonoma"
+
+
+def test_unusable_data_root_fails_the_diagnosis(tmp_path: Path) -> None:
+    """Si la raíz de datos no puede usarse, el diagnóstico lo dice sin crudos técnicos."""
+    report = collect_diagnostics(data_root=_root_that_cannot_be_created(tmp_path))
+    assert report.local_checks_passed is False
+    text = " ".join(f"{check.name}:{check.message}" for check in report.checks)
+    assert any(word in text for word in ("escritura", "permisos", "Configuración"))
+    assert "Traceback" not in text  # el usuario nunca ve una traceback
+
+
+def test_unwritable_data_root_is_reported_as_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """La rama `sin escritura` se reporta como ERROR accionable, no como fallo misterioso."""
+    monkeypatch.setattr("autonoma.diagnostics.writable_directory", lambda path: False)
+    report = collect_diagnostics(data_root=tmp_path)
+    assert report.local_checks_passed is False
+    failing = [check for check in report.checks if check.status is CheckStatus.ERROR]
+    assert {"data_directory", "knowledge_directory", "log_directory"} <= {check.name for check in failing}
+    assert all("sin escritura" in check.message for check in failing)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows no honra el modo de un directorio")
+def test_read_only_directory_is_detected_on_posix(tmp_path: Path) -> None:
+    """Evidencia real de permisos (POSIX): `writable_directory` no se fía de `os.access`."""
     blocked = tmp_path / "bloqueado"
     blocked.mkdir()
     blocked.chmod(0o500)
     try:
-        report = collect_diagnostics(data_root=blocked)
+        assert writable_directory(blocked) is False
     finally:
         blocked.chmod(0o700)
-    assert report.local_checks_passed is False
-    messages = " ".join(check.message for check in report.failures)
-    assert "permisos" in messages or "escritura" in messages
-    assert str(blocked) not in messages or True  # el informe nunca lanza una traceback
+    assert writable_directory(blocked) is True  # el bloqueo era del modo, no del sistema
 
 
 def test_writable_directory_helper_matches_the_report(tmp_path: Path) -> None:
     assert writable_directory(tmp_path) is True
     assert writable_directory(tmp_path / "inexistente" / "sub") is True  # se crea si hace falta
-    assert writable_directory(Path("/proc/1/root/no-existe")) is False
+    assert writable_directory(_root_that_cannot_be_created(tmp_path)) is False
 
 
 def test_elevation_is_tri_state() -> None:
@@ -103,13 +133,8 @@ def test_selftest_json_has_the_executable_contract(tmp_path: Path, capsys: pytes
 
 
 def test_selftest_reports_an_unwritable_data_root(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    hostile = tmp_path / "sin-permisos"
-    hostile.mkdir()
-    hostile.chmod(0o500)
-    try:
-        code = run_selftest(as_json=True, data_root=DataRoot(hostile / "autonoma", DataOrigin.FLAG))
-    finally:
-        hostile.chmod(0o700)
+    """El smoke del .exe debe fallar si la raíz de datos no admite escritura."""
+    code = run_selftest(as_json=True, data_root=DataRoot(_root_that_cannot_be_created(tmp_path), DataOrigin.FLAG))
     payload = json.loads(capsys.readouterr().out)
     assert code == 1
     assert payload["ok"] is False
