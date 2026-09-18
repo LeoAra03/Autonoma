@@ -120,7 +120,10 @@ def python_candidates(explicit: str | None, *, windows: bool | None = None) -> l
     """Lista ordenada de comandos a probar; lo que diga el usuario va primero."""
     out: list[list[str]] = []
     if explicit:
-        out.append(shlex.split(explicit))
+        # Si apunta a un archivo que existe, se toma tal cual: `shlex.split` se comería las
+        # barras de una ruta de NTFS (C:\Python312 -> C:Python312) y partiría una ruta con
+        # espacios. Como lista sólo se parte lo que es "comando y argumentos" (`py -3`).
+        out.append([explicit] if Path(explicit).is_file() else shlex.split(explicit))
     if on_windows() if windows is None else windows:
         out.extend([[name, "-3"] for name in WINDOWS_LAUNCHER])
     for name in PYTHON_CANDIDATES:
@@ -130,7 +133,9 @@ def python_candidates(explicit: str | None, *, windows: bool | None = None) -> l
     return out
 
 
-def current_python(*, version: tuple[int, ...] | None = None, executable: str | None = None) -> tuple[list[str], str] | None:
+def current_python(
+    *, version: tuple[int, ...] | None = None, executable: str | None = None
+) -> tuple[list[str], str] | None:
     """El intérprete que ya nos está ejecutando, si cumple; `None` si no sirve.
 
     Se resuelve dentro del proceso, sin lanzar nada: cuando `bootstrap.py` ya corre sobre un

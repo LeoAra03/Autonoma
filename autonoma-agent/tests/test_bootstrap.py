@@ -48,6 +48,15 @@ def test_setup_uses_the_interpreter_named_by_the_environment(monkeypatch: pytest
     assert asked == ["/opt/py/bin/python"]
 
 
+def test_an_existing_interpreter_path_is_taken_verbatim(tmp_path: Path) -> None:
+    """`--python` con una ruta que existe no se parte ni se desparrama con las barras de NTFS."""
+    exe = tmp_path / "python con espacio.exe"
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert bootstrap.python_candidates(str(exe))[0] == [str(exe)]
+    # Sin un archivo detrás se interpreta como comando con argumentos, que es el otro uso.
+    assert bootstrap.python_candidates("py -3")[0] == ["py", "-3"]
+
+
 def test_a_good_current_interpreter_needs_no_probing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Con un Python que ya cumple en marcha, `find_python` no lanza ni un subprocess."""
 
