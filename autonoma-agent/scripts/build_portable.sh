@@ -12,6 +12,7 @@
 #   --zipapp      fuerza el zipapp universal, saltando PyInstaller
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$PWD"
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 SKIP_SMOKE=0

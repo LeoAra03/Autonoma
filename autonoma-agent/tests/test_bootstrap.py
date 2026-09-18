@@ -7,6 +7,7 @@ de alguien con un PATH raro.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -298,13 +299,17 @@ def opts(command: str, *extra: str, dry_run: bool = True) -> SimpleNamespace:
     return SimpleNamespace(command=command, args=list(extra), python=None, venv=None, no_input=True, dry_run=dry_run)
 
 
-def test_main_infers_run_for_a_bare_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_infers_run_for_a_bare_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`bootstrap "hola"` = `bootstrap run "hola"`, usando el entry point del entorno."""
     seen: list[list[str]] = []
+    entry = bootstrap.venv_executable(tmp_path, "autonoma", windows=(os.name == "nt"))
+    entry.parent.mkdir(parents=True)
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "resolved_venv", lambda explicit: tmp_path)
     monkeypatch.setattr(bootstrap, "setup", lambda *a, **k: None)
-    monkeypatch.setattr(bootstrap, "ensure_env_file", lambda **k: True)
     monkeypatch.setattr(bootstrap.subprocess, "call", lambda command, **k: seen.append(list(command)) or 0)
     assert bootstrap.main(["resume mis notas", "--plain"]) == 0
-    assert seen[0][0].endswith("autonoma")  # el entry point del venv, no un `python -c` suelto
+    assert seen[0][0] == str(entry)  # el entry point del venv, no un `python -c` suelto
     assert seen[0][1:] == ["resume mis notas", "--plain"]  # el prompt llega intacto
 
 

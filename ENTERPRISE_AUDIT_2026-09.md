@@ -11,7 +11,7 @@ Baseline auditado: commit `99b4886` (versión 1.1.0) · Sha256 del código origi
 | | antes | después |
 | --- | --- | --- |
 | Puntuación de preparación enterprise | **54 / 100** | **91 / 100** |
-| Sentencias cubiertas (con ramas) | 64 % · 143 pruebas | **87,5 % · 351 pruebas** |
+| Sentencias cubiertas (con ramas) | 64 % · 143 pruebas | **87,3 % · 418 pruebas** |
 | `mypy --strict` | sin configurar | **0 errores en 22 módulos** |
 | `ruff` | `--select F` (sólo errores de nombre) | **selección curada de 20 famílias, 0 avisos** |
 | Excepciones genéricas en el núcleo | 21 × `Exception`/`RuntimeError`/`ValueError` sueltos | **0: taxonomía `AutonomaError` con 14 códigos** |
@@ -122,6 +122,39 @@ y `Session` como *orquestador* de ciclo de vida. La lógica de riesgo vive en
   → artefacto, o ejecutar el `.ps1` en tu Windows. No se fingió un binario.
 
 ---
+
+## 4bis. Distribución: “un comando y ya”
+
+La mejor auditoría no sirve si nadie consigue arrancar el programa. Se añadió una capa de
+instalación **con una sola lógica** (`scripts/bootstrap.py`, biblioteca estándar) y cuatro
+frontales delgados encima:
+
+| Camino | Quién lo usa | Qué hace |
+| --- | --- | --- |
+| `Autonoma-Portable-windows-<v>.zip` | cualquier Windows 10/11, sin Python | descomprimir → `.env` con la clave → doble clic en `Autonoma.exe` |
+| `npm start` | quien ya tiene Node | monta `.venv`, instala, pide la clave la primera vez y abre el agente |
+| `Run-Autonoma.bat` / `./run-autonoma.sh` | sin Node, con Python | idéntico al anterior, delegando en el mismo instalador |
+| `pip install -e ./autonoma-agent` | desarrollo | el entry point `autonoma` de siempre |
+
+Decisiones de diseño que importan para la auditoría:
+
+- **Un solo instalador.** `bootstrap.mjs`, el `.bat` y el `.sh` sólo buscan Python y delegan;
+  no existen cuatro implementaciones de "instalar" que puedan divergir.
+- **Idempotencia medida.** Una marca (`venv/autonoma-install.json`) con la huella del
+  `pyproject.toml` y los requirements decide si reinstalar: segunda pasada ≈0,06 s (probado
+  en un clon limpio). Un manifiesto cambiado invalida la marca; un JSON corrupto se ignora.
+- **Sin secretos en el canal equivocado.** La clave se pide con `getpass`, se guarda en
+  `.env` y nunca viaja por `argv` ni por el registro. `bootstrap status` la muestra como
+  booleano, no como valor.
+- **Fallos legibles.** Sin Python → qué instalar y cómo decirle cuál usar; sin red de PyPI →
+  se señala el ejecutable portable. Cero tracebacks en el camino de arranque.
+- **El `.exe` no se traga los errores**: con doble clic (congenelado, sin prompt, con TTY)
+  espera un Enter antes de cerrar; `AUTONOMA_NO_PAUSE=1` para automatizaciones.
+- **Paquete verificable**: `make_bundle.py` arma el ZIP con el binario, su `.sha256`,
+  `.env.example` y un LEEME generado con la versión real del paquete (mismo origen único).
+- 52 pruebas nuevas (`test_bootstrap`, `test_portable_bundle`, `test_repo_installer`)
+  cubren descubrimiento de intérprete, marca, `.env`, enrutado y coherencia
+  `package.json` ↔ documentación ↔ CI.
 
 ## 5. Riesgos residuales (honestos)
 

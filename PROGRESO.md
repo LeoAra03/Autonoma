@@ -125,8 +125,8 @@ Informe completo: [ENTERPRISE_AUDIT_2026-09.md](ENTERPRISE_AUDIT_2026-09.md). Re
 
 | Comprobación | Resultado |
 | --- | --- |
-| Pruebas | 351 satisfactorias (1 omitida por requerir NTFS real) |
-| Cobertura combinada líneas/ramas | 87,5% (umbral exigido 80%) |
+| Pruebas | 418 satisfactorias (1 omitida por requerir NTFS real) |
+| Cobertura combinada líneas/ramas | 87,3% (umbral exigido 80%) |
 | `mypy --strict` | 0 errores en los 22 módulos del paquete |
 | `ruff check` (selección amplia) | 0 avisos |
 | `validate_arguments` | 11,23 µs → 2,55 µs (4,4×) |
@@ -148,3 +148,6 @@ Cambios de comportamiento que conviene conocer:
    `trace_id`, `autonoma/py.typed`, `scripts/bench.py` como puerta de regresión.
 6. Empaquetado: `autonoma.spec` unificado (onefile en cualquier SO), `build_windows.ps1`,
    `build_portable.sh` con fallback zipapp, artefactos y Release en CI.
+7. Distribución en un comando: `scripts/bootstrap.py` (npm start, `Run-Autonoma.bat`,
+   `./run-autonoma.sh`) y `scripts/make_bundle.py` (ZIP portable con LEEME y `.sha256`);
+   ver [INSTALL.md](INSTALL.md).

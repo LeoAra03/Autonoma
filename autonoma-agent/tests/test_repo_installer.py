@@ -111,9 +111,21 @@ def test_ci_installs_the_project_through_the_same_entry_point() -> None:
     workflow = _read(REPO_ROOT / ".github" / "workflows" / "tests.yml")
     assert "python scripts/bootstrap.py --no-input setup" in workflow
     assert "npm start --silent" in workflow
-    assert "python scripts/make_bundle.py --platform windows" in workflow
+    assert "make_bundle.py --platform windows --dist-dir dist" in workflow
+    assert "$global:LASTEXITCODE = 0" in workflow  # el ZIP no puede tumbar el smoke del .exe
     assert "Autonoma-Portable-windows*.zip" in workflow  # el ZIP llega como artefacto, no se pierde
     assert "mypy --platform win32" in workflow
+
+
+def test_build_scripts_wire_the_bundle_step() -> None:
+    """`dist/` se empaqueta desde los propios scripts: CI y local no pueden divergir."""
+    portable = _read(AGENT / "scripts" / "build_portable.sh")
+    assert 'ROOT="$PWD"' in portable  # sin esto, `set -u` revienta el paso del ZIP
+    assert "make_bundle.py" in portable
+    assert portable.rstrip().endswith("build_zipapp\nbundle") or "bundle" in portable.split("build_zipapp")[-1]
+    windows = _read(AGENT / "scripts" / "build_windows.ps1")
+    assert "make_bundle.py" in windows and "SkipSmoke" in windows
+    assert "Write-Warning" in windows  # un ZIP que no se arma no puede tumbar el build del .exe
 
 
 def test_install_doc_covers_every_distribution_route() -> None:

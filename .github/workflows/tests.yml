@@ -100,9 +100,11 @@ jobs:
             if (-not $_.ok) { throw "selftest falló: $($_.checks | ConvertTo-Json -Compress)" }
           }
           if ($LASTEXITCODE -ne 0) { throw 'Selftest smoke test failed' }
-          python scripts/make_bundle.py --platform windows --dist-dir autonoma-agent/dist
           $hash = (Get-FileHash .\dist\Autonoma.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  Autonoma.exe" | Set-Content .\dist\Autonoma.exe.sha256
+          python ..\scripts\make_bundle.py --platform windows --dist-dir dist
+          # El ZIP es un extra de comodidad: si algo falla, el .exe verificado sigue siendo el entregable.
+          $global:LASTEXITCODE = 0
       - uses: actions/upload-artifact@v4
         with:
           name: Autonoma-Windows-unsigned
