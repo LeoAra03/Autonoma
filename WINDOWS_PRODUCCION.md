@@ -84,12 +84,46 @@ por clave ausente, falta de TTY o elevación. `network_tested=false` es intencio
 
 ## Evidencia y autoevaluación de esta entrega
 
-Comprobado en Linux/Python 3.11.2:
+Comprobado en Linux/Python 3.11.2 (estado de la versión 2.0.0):
 
-- **143 pruebas pasan; 1 se omite** porque necesita Windows/NTFS real.
-- Ruff (`--select F`), compileall y diagnóstico real en proceso separado sin credenciales.
-- Cobertura combinada líneas/ramas: **63,88%**, por encima del umbral provisional del 60%.
+- **351 pruebas pasan; 1 se omite** porque necesita Windows/NTFS real (junction de `mklink /J`).
+- Ruff con selección curada (`E, W, F, I, UP, B, C4, PERF, SIM, RET, PIE, RUF, ANN, TRY, EM, BLE, ARG, SLF, PLC, PLE, PLW0603, PLR0124, PLR1714, PLR1722, PTH, S, DTZ, INP, PT, FBT`),
+  `mypy --strict` sin errores y compileall.
+- Cobertura combinada líneas/ramas: **87,5%**, umbral exigido 80%.
+- Puerta anti-regresión de rendimiento: `python scripts/bench.py --baseline b.json` (mínimo de
+  5 corridas; falla si una métrica empeora más de 1,35×).
 - El diagnóstico distingue explícitamente configuración local de disponibilidad del proveedor.
+
+## Reparto en un PC sin entorno de desarrollo
+
+Tres opciones de menor a más compromiso (detalle en [INSTALL.md](INSTALL.md)):
+
+1. `Autonoma-Portable-windows-<versión>.zip`: descomprimir, renombrar `.env.example` a `.env`,
+   pegar la clave y doble clic en `Autonoma.exe`. Se arma con `scripts/make_bundle.py`
+   (y desde `build_windows.ps1`), con su `.sha256`.
+2. `npm start` (Node instalado): el instalador de `scripts/bootstrap.py` monta el `.venv` y
+   arranca; segunda pasada en menos de un segundo.
+3. `Run-Autonoma.bat`: lo mismo sin Node, sólo con Python en el PATH.
+
+Al hacer doble clic, el `.exe` espera un Enter antes de cerrar la ventana para que un error
+quede legible (`AUTONOMA_NO_PAUSE=1` lo desactiva en automatizaciones).
+
+## Autoensayo del ejecutable portable
+
+El bundle debe demostrarse a sí mismo sin credenciales ni red:
+
+```powershell
+autonoma-agent\dist\Autonoma.exe --selftest --json
+```
+
+Devuelve `ok`, `frozen`, `checks[]` (import de todos los módulos del paquete, raíz de datos
+escribible, presencia de dependencias, `pynput` como advertencia opcional) y
+`local_checks_passed`. `network_tested=false` es intencional: el autoensayo nunca llama a
+proveedores. Los scripts `autonoma-agent/scripts/build_windows.ps1` (onefile; `-SkipSmoke` para omitir el ensayo) y
+`build_portable.sh` (PyInstaller o zipapp como fallback) ejecutan ese autoensayo sobre el
+artefacto antes de darlo por bueno y publican un `.sha256`. CI construye el `.exe` en la job
+`windows-executable` y lo sube a un Release cuando se etique `v*`; el binario **no** está
+firmado, así que SmartScreen advertirá la primera vez.
 
 La prueba nativa omitida crea una junction real con `mklink /J` y verifica que no se modifique el
 archivo destino a través de ella. Está incluida en CI Windows, pero **ese job no se ha ejecutado ni

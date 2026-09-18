@@ -115,3 +115,39 @@ python -m venv .venv
 .venv/bin/pip-audit --require-hashes -r autonoma-agent/requirements-lock.txt
 .venv/bin/python -m build autonoma-agent
 ```
+
+
+---
+
+## Tercera etapa — refactor enterprise (versión 2.0.0, 17-09-2026)
+
+Informe completo: [ENTERPRISE_AUDIT_2026-09.md](ENTERPRISE_AUDIT_2026-09.md). Resumen:
+
+| Comprobación | Resultado |
+| --- | --- |
+| Pruebas | 425 satisfactorias (1 omitida por requerir NTFS real) |
+| Cobertura combinada líneas/ramas | 87,3% (umbral exigido 80%) |
+| `mypy --strict` | 0 errores en los 22 módulos del paquete |
+| `ruff check` (selección amplia) | 0 avisos |
+| `validate_arguments` | 11,23 µs → 2,55 µs (4,4×) |
+| `is_protected` con 60 raíces | 1597,86 µs → 24,49 µs (65×) |
+| `tool_schemas()` | 9,01 µs y mutable → 0,11 µs e inmutable (`MappingProxyType` recursivo) |
+| `research()` con 3 páginas | 159,3 ms secuencial → 59,9 ms en abanico (2,7×) |
+| Uso de memoria por turno | estable (p95 25 MiB, `growth_ratio` 0,94× sobre 12 turnos) |
+
+Cambios de comportamiento que conviene conocer:
+
+1. `Settings` es inmutable; `run_command` devuelve `CommandResult` tipado.
+2. Los errores del agente son `AutonomaError` con `ErrorCode` y `ExitCode`; la UI ya no
+   deduce el fallo buscando substrings.
+3. `/key` y `/brave` escriben en `.env` y aplican overrides locales: **el entorno del
+   proceso no se modifica** (dejar de exportar `AUTONOMA_HOME` globalmente).
+4. Cada recarga cierra los recursos del agente anterior (había acumulación de limpiezas
+   huérfanas); `close()` es idempotente y `unregister_cleanup` coincide por igualdad.
+5. Nuevos: `--selftest`, `/status` con métricas y percentiles, `logs/autonoma.jsonl` con
+   `trace_id`, `autonoma/py.typed`, `scripts/bench.py` como puerta de regresión.
+6. Empaquetado: `autonoma.spec` unificado (onefile en cualquier SO), `build_windows.ps1`,
+   `build_portable.sh` con fallback zipapp, artefactos y Release en CI.
+7. Distribución en un comando: `scripts/bootstrap.py` (npm start, `Run-Autonoma.bat`,
+   `./run-autonoma.sh`) y `scripts/make_bundle.py` (ZIP portable con LEEME y `.sha256`);
+   ver [INSTALL.md](INSTALL.md).

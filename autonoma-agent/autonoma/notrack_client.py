@@ -1,29 +1,108 @@
-"""Cliente HTTP para la API OpenAI-compatible de NoTrack.ai."""
+"""Cliente HTTP para la API OpenAI-compatible de NoTrack.ai.
+
+Refuerzo respecto a la versión anterior:
+- Errores tipados (`ProviderHttpError`, `ProviderUnavailableError`,
+  `ProviderContractError`) en lugar de una sola clase con el detalle en el mensaje;
+  `NoTrackError` se conserva como alias de la base para llamadores existentes.
+- Reintentos con retroceso exponencial y respeto de `Retry-After`, sólo para fallos
+  transitorios (429/5xx/red), cancelables por `PanicController`.
+- El cuerpo remoto nunca se interpola en el error: se pierde el detalle a cambio de
+  no filtrar secretos ni contenido del usuario (contrato probado en `tests`).
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Final, TypeVar
 from urllib.parse import urlsplit
-from collections.abc import Callable, Iterator
-from typing import Any
 
 import httpx
 
+from autonoma.config import DEFAULT_NOTRACK_BASE_URL, DEFAULT_NOTRACK_MODEL
+from autonoma.errors import (
+    ConfigurationError,
+    ProviderContractError,
+    ProviderError,
+    ProviderHttpError,
+    ProviderUnavailableError,
+)
 from autonoma.key_handler import PanicController
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://api.notrack.ai/v1"
-DEFAULT_MODEL = "notrack-uncensored"
+T = TypeVar("T")
+
+__all__ = [
+    "DEFAULT_BASE_URL",
+    "DEFAULT_MODEL",
+    "NoTrackClient",
+    "NoTrackError",
+    "Usage",
+]
+
+DEFAULT_BASE_URL: Final[str] = DEFAULT_NOTRACK_BASE_URL
+DEFAULT_MODEL: Final[str] = DEFAULT_NOTRACK_MODEL
+NoTrackError = ProviderError
+
+_MAX_RESPONSE_BYTES: Final[int] = 2_000_000
+_MAX_STREAM_CHARS: Final[int] = 100_000
+_MAX_SSE_EVENT_CHARS: Final[int] = 100_000
+_MAX_TOOL_CALLS: Final[int] = 16
+_RETRYABLE_STATUS: Final[frozenset[int]] = ProviderHttpError.RETRYABLE_STATUS
+_RETRY_AFTER_CAP_SECONDS: Final[float] = 10.0
+_HINTS: Final[Mapping[int, str]] = MappingProxyType(
+    {
+        401: "Clave inválida o expirada; actualízala con /key.",
+        403: "Tu cuenta no tiene permiso para esta operación.",
+        404: "El endpoint o modelo no existe; revisa NOTRACK_MODEL.",
+        429: "Límite de uso alcanzado; espera antes de volver a intentar.",
+    }
+)
 
 
-class NoTrackError(RuntimeError):
-    """Error de red, autenticación o contrato de la API."""
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Tokens informados por el proveedor; `None` cuando el proveedor no los envía."""
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any] | None) -> Usage:
+        if not isinstance(payload, dict):
+            return cls()
+        return cls(
+            prompt_tokens=_int_or_none(payload.get("prompt_tokens")),
+            completion_tokens=_int_or_none(payload.get("completion_tokens")),
+            total_tokens=_int_or_none(payload.get("total_tokens")),
+        )
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            key: value
+            for key, value in {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+            }.items()
+            if value is not None
+        }
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
 
 
 class NoTrackClient:
-    """Envía consultas a https://api.notrack.ai/v1 (chat/completions)."""
+    """Envía consultas a `{base_url}/chat/completions` con contrato validado."""
 
     def __init__(
         self,
@@ -33,24 +112,27 @@ class NoTrackClient:
         model: str = DEFAULT_MODEL,
         timeout: float = 120.0,
         persona: str = "notrack",
+        *,
+        max_retries: int = 2,
+        retry_backoff: float = 0.5,
     ) -> None:
         self.api_key = (api_key or "").strip()
         self.panic = panic
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        parsed = urlsplit(self.base_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("NOTRACK_BASE_URL requiere HTTPS, sin credenciales, query ni fragmento")
+        self.base_url = validate_base_url(base_url)
         self.model = model or DEFAULT_MODEL
         self.timeout = timeout
         self.persona = persona
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff = max(0.0, float(retry_backoff))
         self._client: httpx.Client | None = None
         panic.register_cleanup(self.close)
 
+    # ------------------------------------------------------------------ recursos
     @property
     def configured(self) -> bool:
         return bool(self.api_key)
 
-    def _ensure_client(self) -> httpx.Client:
+    def ensure_client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(
                 base_url=self.base_url,
@@ -59,42 +141,202 @@ class NoTrackClient:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    "User-Agent": "Autonoma/1.1",
+                    "User-Agent": f"Autonoma/{self._app_version()}",
                 },
                 follow_redirects=False,
                 trust_env=False,
             )
         return self._client
 
+    @staticmethod
+    def _app_version() -> str:
+        try:
+            from autonoma import __version__
+
+            return str(__version__)
+        except ImportError:  # pragma: no cover - sólo en empaquetados parciales
+            return "0"
+
+    # PyPI/tests antiguos usan el nombre privado; se conserva como alias.
+    _ensure_client = ensure_client
+
     def close(self) -> None:
-        client = self._client
-        self._client = None
+        """Cierra el cliente y desregistra su propia limpieza (dobles cierres: seguros)."""
+        self.panic.unregister_cleanup(self.close)
+        client, self._client = self._client, None
         if client is not None and not client.is_closed:
             try:
                 client.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Cierre de NoTrackClient: %s", exc)
+            except httpx.HTTPError as exc:
+                logger.debug(
+                    "cierre de cliente",
+                    extra={"event": "provider.close_error", "fields": {"error": type(exc).__name__}},
+                )
 
+    # -------------------------------------------------------------------- red
     def _raise_for_status(self, response: httpx.Response) -> None:
         if 200 <= response.status_code < 300:
             return
-        messages = {
-            401: "Clave inválida o expirada; actualízala con /key.",
-            403: "Tu cuenta no tiene permiso para esta operación.",
-            429: "Límite de uso alcanzado; espera antes de volver a intentar.",
-        }
-        hint = messages.get(response.status_code, "Respuesta HTTP inesperada; revisa el estado del proveedor.")
-        # No imprimir cuerpos remotos: podrían contener claves o contenido del usuario.
-        raise NoTrackError(f"NoTrack HTTP {response.status_code}: {hint}")
+        hint = _HINTS.get(response.status_code, "Respuesta HTTP inesperada; revisa el estado del proveedor.")
+        raise ProviderHttpError(
+            f"NoTrack HTTP {response.status_code}: {hint}",
+            status_code=response.status_code,
+        )
 
     def _read_response(self, response: httpx.Response) -> bytes:
         data = bytearray()
         for chunk in response.iter_bytes(chunk_size=8192):
             self.panic.check()
             data.extend(chunk)
-            if len(data) > 2_000_000:
-                raise NoTrackError("Respuesta NoTrack demasiado grande")
+            if len(data) > _MAX_RESPONSE_BYTES:
+                raise ProviderContractError("Respuesta NoTrack demasiado grande")
         return bytes(data)
+
+    def _delay_before_retry(self, response: httpx.Response | None, attempt: int) -> float:
+        """Respeta `Retry-After` del proveedor, con tope, y si no hay cabecera retrocede."""
+        backoff = float(min(self.retry_backoff * (2.0**attempt), _RETRY_AFTER_CAP_SECONDS))
+        if response is None:
+            return backoff
+        raw = response.headers.get("retry-after", "").strip()
+        if not raw:
+            return backoff
+        try:
+            return float(max(0.0, min(float(raw), _RETRY_AFTER_CAP_SECONDS)))
+        except ValueError:
+            return backoff
+
+    def _request_with_retry(
+        self,
+        client: httpx.Client,
+        body: dict[str, Any],
+        *,
+        consume: Callable[[httpx.Response], T],
+        failure_message: str,
+        allow_retry: Callable[[], bool],
+    ) -> T:
+        """Un único punto de reintento: sólo lo transitorio se repite; nada se traga.
+
+        `allow_retry` corta el reintento cuando ya se entregó algo al usuario, para
+        no duplicar texto en streaming.
+        """
+        attempts = self.max_retries + 1
+        last_error: BaseException | None = None
+        for attempt in range(attempts):
+            self.panic.check()
+            response: httpx.Response | None = None
+            try:
+                with client.stream("POST", "chat/completions", json=body) as response:
+                    self._raise_for_status(response)
+                    return consume(response)
+            except httpx.HTTPError as exc:
+                self.panic.check()
+                # La causa cruda se encadena (traceback en el log) pero el mensaje
+                # que ve el usuario/esquema del modelo sigue siendo el genérico.
+                last_error = ProviderUnavailableError(
+                    failure_message,
+                    context={"cause": type(exc).__name__, "attempt": attempt + 1},
+                )
+                last_error.__cause__ = exc
+                logger.warning(
+                    "fallo de transporte con NoTrack",
+                    extra={
+                        "event": "provider.transport_error",
+                        "fields": {"attempt": attempt + 1, "error": type(exc).__name__},
+                    },
+                )
+            except ProviderHttpError as exc:
+                last_error = exc
+                if exc.status_code not in _RETRYABLE_STATUS:
+                    raise
+            if attempt >= attempts - 1 or not allow_retry():
+                break
+            self.panic.wait(self._delay_before_retry(response, attempt))
+        if last_error is None:  # defensivo: el bucle siempre asigna antes de salir
+            raise ProviderUnavailableError(failure_message)
+        raise last_error
+
+    # ------------------------------------------------------------------- API
+    def chat(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Completión no streaming, con contrato validado y cancelación cooperativa."""
+        self._require_key()
+        self.panic.check()
+        body = self._payload(
+            list(messages),
+            tools=list(tools) if tools else None,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False,
+            extra=extra,
+        )
+
+        def consume(response: httpx.Response) -> dict[str, Any]:
+            raw = self._read_response(response)
+            return self._decode(raw)
+
+        data = self._request_with_retry(
+            self.ensure_client(),
+            body,
+            consume=consume,
+            failure_message="No se pudo conectar con NoTrack; revisa tu conexión y vuelve a intentar.",
+            allow_retry=_always,
+        )
+        self.panic.check()
+        self.extract_message(data)  # valida el contrato antes de tocar cualquier herramienta
+        return data
+
+    def chat_stream(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
+        """Streaming SSE de texto; exige evento de cierre y rechaza tool_calls."""
+        self._require_key()
+        self.panic.check()
+        body = self._payload(list(messages), temperature=temperature, max_tokens=max_tokens, stream=True)
+        pieces: list[str] = []
+        state = _StreamState()
+
+        def consume(response: httpx.Response) -> str:
+            state.reset()
+            pieces.clear()
+            for line in self._iter_sse_lines(response, state):
+                self.panic.check()
+                if line == "[DONE]":
+                    state.completed = True
+                    break
+                self._apply_sse_event(line, pieces, state, on_delta)
+            return "".join(pieces)
+
+        text = self._request_with_retry(
+            self.ensure_client(),
+            body,
+            consume=consume,
+            failure_message="Conexión streaming interrumpida; vuelve a intentar.",
+            allow_retry=state.untouched,
+        )
+        if not state.completed:
+            raise ProviderContractError("Streaming incompleto: falta el evento de cierre")
+        return text
+
+    def _require_key(self) -> None:
+        if not self.configured:
+            raise ProviderUnavailableError(
+                "Falta NOTRACK_API_KEY. Créalas en https://notrack.ai/api-keys "
+                "y pégala con /key o en el archivo .env"
+            )
 
     def _payload(
         self,
@@ -110,8 +352,8 @@ class NoTrackClient:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "temperature": _bounded_temperature(temperature),
+            "max_tokens": _positive_int(max_tokens, 1, 32_768),
             "stream": stream,
             "notrack": {"persona": self.persona},
         }
@@ -123,129 +365,69 @@ class NoTrackClient:
             body.update(extra)
         return body
 
-    def chat(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-        temperature: float = 0.4,
-        max_tokens: int = 4096,
-        extra: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Completión no streaming. Cancelable vía PanicController."""
-        if not self.configured:
-            raise NoTrackError(
-                "Falta NOTRACK_API_KEY. Créalas en https://notrack.ai/api-keys "
-                "y pégala con /key o en el archivo .env"
-            )
-        self.panic.check()
-        client = self._ensure_client()
-        body = self._payload(
-            messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=False,
-            extra=extra,
-        )
-        try:
-            with client.stream("POST", "chat/completions", json=body) as response:
-                self._raise_for_status(response)
-                raw = self._read_response(response)
-        except httpx.HTTPError:
-            self.panic.check()
-            raise NoTrackError("No se pudo conectar con NoTrack; revisa tu conexión y vuelve a intentar.") from None
-        self.panic.check()
+    def _decode(self, raw: bytes) -> dict[str, Any]:
         try:
             data = json.loads(raw)
         except (ValueError, UnicodeError, RecursionError):
-            raise NoTrackError("La API de NoTrack no devolvió JSON válido") from None
-        self.extract_message(data)
+            raise ProviderContractError("La API de NoTrack no devolvió JSON válido") from None
+        if not isinstance(data, dict):
+            raise ProviderContractError("Respuesta NoTrack debe ser un objeto")
         return data
 
-    def chat_stream(
+    def _apply_sse_event(
         self,
-        messages: list[dict[str, Any]],
-        *,
-        temperature: float = 0.4,
-        max_tokens: int = 4096,
-        on_delta: Callable[[str], None] | None = None,
-    ) -> str:
-        """Streaming SSE. on_delta recibe cada fragmento de texto."""
-        if not self.configured:
-            raise NoTrackError("Falta NOTRACK_API_KEY")
-        self.panic.check()
-        client = self._ensure_client()
-        body = self._payload(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True,
-        )
-        pieces: list[str] = []
-        total = 0
-        completed = False
+        line: str,
+        pieces: list[str],
+        state: _StreamState,
+        on_delta: Callable[[str], None] | None,
+    ) -> None:
         try:
-            with client.stream("POST", "chat/completions", json=body) as response:
-                self._raise_for_status(response)
-                for line in self._iter_sse_lines(response):
-                    self.panic.check()
-                    if line == "[DONE]":
-                        completed = True
-                        break
-                    try:
-                        chunk = json.loads(line)
-                    except (ValueError, RecursionError):
-                        raise NoTrackError("Evento SSE inválido") from None
-                    if not isinstance(chunk, dict) or "error" in chunk:
-                        raise NoTrackError("Formato SSE inesperado")
-                    choices = chunk.get("choices", [])
-                    if not isinstance(choices, list):
-                        raise NoTrackError("Formato SSE inesperado")
-                    if not choices:  # Evento de estadísticas de uso
-                        continue
-                    if not isinstance(choices[0], dict) or not isinstance(choices[0].get("delta"), dict):
-                        raise NoTrackError("Delta SSE inválido")
-                    delta = choices[0]["delta"]
-                    if delta.get("tool_calls"):
-                        raise NoTrackError("Este streaming de texto no admite herramientas")
-                    content = delta.get("content")
-                    if content is None:
-                        continue
-                    if not isinstance(content, str):
-                        raise NoTrackError("Contenido SSE inválido")
-                    total += len(content)
-                    if total > 100_000:
-                        raise NoTrackError("Respuesta streaming demasiado grande")
-                    pieces.append(content)
-                    if on_delta:
-                        on_delta(content)
-        except httpx.HTTPError:
-            self.panic.check()
-            raise NoTrackError("Conexión streaming interrumpida; vuelve a intentar.") from None
-        if not completed:
-            raise NoTrackError("Streaming incompleto: falta el evento de cierre")
-        return "".join(pieces)
+            chunk = json.loads(line)
+        except (ValueError, RecursionError):
+            raise ProviderContractError("Evento SSE inválido") from None
+        if not isinstance(chunk, dict) or "error" in chunk:
+            raise ProviderContractError("Formato SSE inesperado")
+        choices = chunk.get("choices", [])
+        if not isinstance(choices, list):
+            raise ProviderContractError("Formato SSE inesperado")
+        if not choices:  # evento de estadísticas de uso
+            state.usage = Usage.from_payload(chunk.get("usage"))
+            return
+        first = choices[0]
+        if not isinstance(first, dict) or not isinstance(first.get("delta"), dict):
+            raise ProviderContractError("Delta SSE inválido")
+        delta = first["delta"]
+        if delta.get("tool_calls"):
+            raise ProviderContractError("Este streaming de texto no admite herramientas")
+        content = delta.get("content")
+        if content is None:
+            return
+        if not isinstance(content, str):
+            raise ProviderContractError("Contenido SSE inválido")
+        state.total += len(content)
+        if state.total > _MAX_STREAM_CHARS:
+            raise ProviderContractError("Respuesta streaming demasiado grande")
+        pieces.append(content)
+        if on_delta is not None:
+            on_delta(content)
 
-    def _iter_sse_lines(self, response: httpx.Response) -> Iterator[str]:
+    def _iter_sse_lines(self, response: httpx.Response, state: _StreamState) -> Iterator[str]:
+        """Parser SSE: separadores, `data:` multi-línea y topes por evento/buffer."""
         buffer = ""
         fields: list[str] = []
         event_size = 0
-        total = 0
         for raw in response.iter_text(chunk_size=4096):
             self.panic.check()
-            total += len(raw)
-            if total > 2_000_000:
-                raise NoTrackError("Flujo SSE demasiado grande")
+            state.raw_size += len(raw)
+            if state.raw_size > _MAX_RESPONSE_BYTES:
+                raise ProviderContractError("Flujo SSE demasiado grande")
             buffer += raw
             while "\n" in buffer:
                 line, _, buffer = buffer.partition("\n")
                 line = line.rstrip("\r")
                 event_size += len(line)
-                if event_size > 100_000:
-                    raise NoTrackError("Evento SSE demasiado grande")
+                if event_size > _MAX_SSE_EVENT_CHARS:
+                    raise ProviderContractError("Evento SSE demasiado grande")
                 if not line:
                     if fields:
                         yield "\n".join(fields)
@@ -253,59 +435,123 @@ class NoTrackClient:
                     event_size = 0
                 elif line.startswith("data:"):
                     fields.append(line[5:].lstrip(" "))
-            if len(buffer) > 100_000:
-                raise NoTrackError("Línea SSE demasiado grande")
+            if len(buffer) > _MAX_SSE_EVENT_CHARS:
+                raise ProviderContractError("Línea SSE demasiado grande")
         # Un evento sin separador final no se considera completo según SSE.
 
     def extract_message(self, completion: Any) -> dict[str, Any]:
+        """Valida `choices/message/tool_calls` y devuelve el mensaje del asistente."""
         if not isinstance(completion, dict):
-            raise NoTrackError("Respuesta NoTrack debe ser un objeto")
+            raise ProviderContractError("Respuesta NoTrack debe ser un objeto")
         choices = completion.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise NoTrackError("NoTrack no devolvió choices válidos")
+            raise ProviderContractError("NoTrack no devolvió choices válidos")
         message = choices[0].get("message")
         if not isinstance(message, dict):
-            raise NoTrackError("Formato de message inesperado")
+            raise ProviderContractError("Formato de message inesperado")
         if message.get("content") is not None and not isinstance(message["content"], str):
-            raise NoTrackError("Contenido de message inválido")
-        calls = message.get("tool_calls")
-        if calls is not None:
-            if not isinstance(calls, list) or len(calls) > 16:
-                raise NoTrackError("Lista de herramientas inválida")
-            ids: set[str] = set()
-            for call in calls:
-                if not isinstance(call, dict) or call.get("type") != "function":
-                    raise NoTrackError("Llamada de herramienta inválida")
-                call_id = call.get("id")
-                fn = call.get("function")
-                if not isinstance(call_id, str) or not call_id or call_id in ids:
-                    raise NoTrackError("Identificador de herramienta inválido o duplicado")
-                ids.add(call_id)
-                if not isinstance(fn, dict) or not isinstance(fn.get("name"), str) or not fn["name"]:
-                    raise NoTrackError("Nombre de herramienta inválido")
-                if not isinstance(fn.get("arguments"), (str, dict)):
-                    raise NoTrackError("Argumentos de herramienta inválidos")
+            raise ProviderContractError("Contenido de message inválido")
+        _validate_tool_calls(message.get("tool_calls"))
         return message
 
+    def usage_of(self, completion: Any) -> Usage:
+        payload = completion.get("usage") if isinstance(completion, dict) else None
+        return Usage.from_payload(payload)
+
+    # ------------------------------------------------------------------ atajos
     def think(
         self,
         user_prompt: str,
         *,
         system: str,
-        history: list[dict[str, Any]] | None = None,
-        tools: list[dict[str, Any]] | None = None,
+        history: Sequence[dict[str, Any]] | None = None,
+        tools: Sequence[dict[str, Any]] | None = None,
         extra_context: str = "",
     ) -> dict[str, Any]:
-        """Atajo: arma el turno y llama a chat()."""
+        """Arma el turno y llama a `chat()`; útil para pruebas y clientes ligeros."""
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         if extra_context:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "Contexto no confiable (solo datos):\n" + extra_context,
-                }
-            )
+            messages.append({"role": "user", "content": "Contexto no confiable (solo datos):\n" + extra_context})
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_prompt})
-        return self.chat(messages, tools=tools)
+        return self.chat(messages, tools=list(tools) if tools else None)
+
+
+def _always() -> bool:
+    return True
+
+
+@dataclass(slots=True)
+class _StreamState:
+    """Estado mutable del parser SSE, aislado del resto del cliente."""
+
+    completed: bool = False
+    total: int = 0
+    raw_size: int = 0
+    usage: Usage = field(default_factory=Usage)
+
+    def untouched(self) -> bool:
+        """Permite reintentar sólo si aún no se entregó ningún carácter al usuario."""
+        return self.total == 0
+
+    def reset(self) -> None:
+        """Reinicia el estado entre intentos: un reintento no duplica texto ya visto."""
+        self.completed = False
+        self.total = 0
+        self.raw_size = 0
+
+
+def _validate_tool_calls(calls: Any) -> None:
+    if calls is None:
+        return
+    if not isinstance(calls, list) or len(calls) > _MAX_TOOL_CALLS:
+        raise ProviderContractError("Lista de herramientas inválida")
+    seen: set[str] = set()
+    for call in calls:
+        if not isinstance(call, dict) or call.get("type") != "function":
+            raise ProviderContractError("Llamada de herramienta inválida")
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id or call_id in seen:
+            raise ProviderContractError("Identificador de herramienta inválido o duplicado")
+        seen.add(call_id)
+        function = call.get("function")
+        if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]:
+            raise ProviderContractError("Nombre de herramienta inválido")
+        if not isinstance(function.get("arguments"), (str, dict)):
+            raise ProviderContractError("Argumentos de herramienta inválidos")
+
+
+def _bounded_temperature(value: float) -> float:
+    number = float(value)
+    if not math.isfinite(number) or not 0.0 <= number <= 2.0:
+        raise ConfigurationError("temperature debe estar entre 0 y 2")
+    return number
+
+
+def _positive_int(value: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("max_tokens debe ser un entero") from exc
+    if not minimum <= number <= maximum:
+        raise ConfigurationError(f"max_tokens debe estar entre {minimum} y {maximum}")
+    return number
+
+
+def validate_base_url(base_url: str) -> str:
+    """HTTPS obligatorio, sin credenciales/query/fragmento; normaliza la barra final."""
+    cleaned = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    parsed = urlsplit(cleaned)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigurationError("NOTRACK_BASE_URL requiere HTTPS, sin credenciales, query ni fragmento")
+    return cleaned
+
+

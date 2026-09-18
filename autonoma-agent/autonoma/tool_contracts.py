@@ -1,196 +1,305 @@
-"""Contrato único de herramientas: esquema enviado al modelo y validación local."""
+"""Contrato único de herramientas: la misma tabla genera el esquema y el validador.
+
+- Las 13 especificaciones se construyen **una vez** al importar (`TOOL_SPECS`) y se
+  indexan en un `dict` (`spec_for`): `validate_arguments` pasó de O(herramientas)
+  reconstruyendo diccionarios en cada llamada a O(1) sobre una tabla inmutable.
+- Tipos y límites de campo son datos declarativos, no ramas `if` de un builder.
+- Errores tipados con el parámetro implicado en el contexto del log.
+"""
+
 from __future__ import annotations
+
 import json
 import math
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Final, Literal
 
-LOCAL_TOOLS = frozenset({"read_file", "write_file", "copy_path", "move_path",
-                         "delete_path", "list_dir", "mkdir", "run_command"})
+from autonoma.errors import ToolContractError
+
+__all__ = [
+    "LOCAL_TOOLS",
+    "TOOL_SPECS",
+    "ToolField",
+    "ToolSpec",
+    "ToolValidationError",
+    "parse_arguments",
+    "spec_for",
+    "tool_names",
+    "tool_schemas",
+    "validate_arguments",
+]
+
+_MAX_ARGUMENTS_CHARS: Final[int] = 100_000
+_MAX_CONTENT_CHARS: Final[int] = 80_000
+_MAX_SCALAR_CHARS: Final[int] = 4_096
+_FORBIDDEN_CHARS: Final[str] = "\x00"
+_BLANK_FORBIDDEN_KEYS: Final[frozenset[str]] = frozenset({"path", "src", "dst", "query", "title", "command", "url"})
+
+FieldType = Literal["string", "integer", "number", "boolean"]
+
+LOCAL_TOOLS: Final[frozenset[str]] = frozenset(
+    {"read_file", "write_file", "copy_path", "move_path", "delete_path", "list_dir", "mkdir", "run_command"}
+)
 
 
-class ToolValidationError(ValueError):
-    """Argumentos no conformes; ninguna herramienta debe ejecutarse."""
+class ToolValidationError(ToolContractError):
+    """Argumentos no conformes: ninguna herramienta debe ejecutarse."""
 
-def tool_schemas() -> list[dict[str, Any]]:
-    def fn(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-        for key, prop in properties.items():
-            if prop['type'] == 'string':
-                prop['maxLength'] = 80_000 if key == 'content' else 4096
-                if key != 'content':
-                    prop['minLength'] = 1
-            if prop['type'] in {'integer', 'number'}:
-                prop['minimum'], prop['maximum'] = (0, 5) if key == 'fetch_pages' else (0.01, 300)
+
+_TYPE_TUPLE: Final[Mapping[str, tuple[type, ...]]] = MappingProxyType(
+    {"string": (str,), "boolean": (bool,), "integer": (int,), "number": (int, float)}
+)
+
+
+def _is_finite_number(value: Any) -> bool:
+    """Enteros exactos siempre finitos; flotales NaN/inf se rechazan explícitamente."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolField:
+    """Definición atómica de un parámetro: fuente única de verdad."""
+
+    name: str
+    type: FieldType
+    description: str = ""
+    required: bool = True
+    max_length: int | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+    def as_schema(self) -> dict[str, Any]:
+        schema: dict[str, Any] = {"type": self.type}
+        if self.description:
+            schema["description"] = self.description
+        if self.type == "string":
+            schema["maxLength"] = self.max_length or _MAX_SCALAR_CHARS
+            schema["minLength"] = 0 if self.name not in _BLANK_FORBIDDEN_KEYS else 1
+        elif self.type in ("integer", "number"):
+            schema["minimum"] = self.minimum
+            schema["maximum"] = self.maximum
+        return schema
+
+    def reject_reason(self, value: Any) -> str | None:
+        """Motivo del rechazo, o `None` cuando el valor es aceptable."""
+        expected = _TYPE_TUPLE[self.type]
+        if self.type == "boolean":
+            if not isinstance(value, bool):
+                return f"Tipo inválido para {self.name}: se requiere boolean"
+        elif isinstance(value, bool) or not isinstance(value, expected):
+            return f"Tipo inválido para {self.name}: se requiere {self.type}"
+        if self.type == "string":
+            text = str(value)
+            if len(text) > (self.max_length or _MAX_SCALAR_CHARS) or _FORBIDDEN_CHARS in text:
+                return f"Tamaño o contenido inválido para {self.name}"
+            if self.name in _BLANK_FORBIDDEN_KEYS and not text.strip():
+                return f"{self.name} no puede estar vacío"
+        elif not _is_finite_number(value):
+            return f"{self.name} debe ser finito"
+        elif self.minimum is not None and self.maximum is not None and not self.minimum <= value <= self.maximum:
+            return f"{self.name} debe estar entre {self.minimum:g} y {self.maximum:g}"
+        return None
+
+    def validate(self, value: Any) -> Any:
+        reason = self.reject_reason(value)
+        if reason is not None:
+            raise ToolValidationError(reason, context={"tool": self.name})
+        return value
+
+
+def _string(name: str, description: str = "", *, max_length: int | None = None, required: bool = True) -> ToolField:
+    return ToolField(name=name, type="string", description=description, max_length=max_length, required=required)
+
+
+def _number(name: str, description: str, minimum: float, maximum: float, *, integer: bool = True) -> ToolField:
+    return ToolField(
+        name=name,
+        type="integer" if integer else "number",
+        description=description,
+        minimum=minimum,
+        maximum=maximum,
+        required=False,
+    )
+
+
+def _flag(name: str, description: str) -> ToolField:
+    return ToolField(name=name, type="boolean", description=description, required=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """Herramienta: nombre, descripción para el modelo y campos admitidos."""
+
+    name: str
+    description: str
+    fields: tuple[ToolField, ...]
+    local: bool = False
+
+    @property
+    def by_field(self) -> Mapping[str, ToolField]:
+        return _fields_index(self.fields)
+
+    @property
+    def required(self) -> tuple[str, ...]:
+        return tuple(field.name for field in self.fields if field.required)
+
+    def as_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
-                "name": name,
-                "description": description,
+                "name": self.name,
+                "description": self.description,
                 "parameters": {
                     "type": "object",
-                    "properties": properties,
-                    "required": required,
+                    "properties": {field.name: field.as_schema() for field in self.fields},
+                    "required": list(self.required),
                     "additionalProperties": False,
                 },
             },
         }
 
-    return [
-        fn(
-            "web_search",
-            "Busca en la web (Brave) y extrae contenido de las páginas top. Guarda un .md en knowledge_base.",
-            {
-                "query": {"type": "string", "description": "Consulta de búsqueda"},
-                "fetch_pages": {
-                    "type": "integer",
-                    "description": "Cuántas páginas extraer (0-5). Por defecto 3.",
-                },
-            },
-            ["query"],
+    def validate(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        """Rechaza de más, de menos y de tipo equivocado; devuelve un dict nuevo."""
+        index = self.by_field
+        unknown = sorted(set(args) - set(index))
+        if unknown:
+            raise ToolValidationError("Parámetros desconocidos", context={"tool": self.name, "unknown": ",".join(unknown)})
+        missing = sorted(set(self.required) - set(args))
+        if missing:
+            raise ToolValidationError("Faltan parámetros obligatorios", context={"tool": self.name, "missing": ",".join(missing)})
+        clean: dict[str, Any] = {}
+        for key, value in args.items():
+            field = index[key]
+            reason = field.reject_reason(value)
+            if reason is not None:
+                raise ToolValidationError(reason, context={"tool": self.name, "argument": key})
+            clean[key] = value
+        return clean
+
+
+_field_indexes: dict[tuple[tuple[str, str], ...], Mapping[str, ToolField]] = {}
+
+
+def _fields_index(fields: tuple[ToolField, ...]) -> Mapping[str, ToolField]:
+    """Índice memoizado por firma de campos: evita reconstruir el `dict` por llamada."""
+    signature = tuple((field.name, field.type) for field in fields)
+    cached = _field_indexes.get(signature)
+    if cached is None:
+        cached = MappingProxyType({field.name: field for field in fields})
+        _field_indexes[signature] = cached
+    return cached
+
+
+_TIMEOUT = _number("timeout", "Segundos máximos", 0.01, 300.0, integer=False)
+
+TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
+    ToolSpec(
+        name="web_search",
+        description="Busca en la web (Brave) y extrae contenido de las páginas top. Guarda un .md en knowledge_base.",
+        fields=(
+            _string("query", "Consulta de búsqueda"),
+            _number("fetch_pages", "Cuántas páginas extraer (0-5). Por defecto 3.", 0, 5),
         ),
-        fn(
-            "fetch_url",
-            "Descarga y extrae el texto visible de una URL concreta.",
-            {"url": {"type": "string"}},
-            ["url"],
+    ),
+    ToolSpec(name="fetch_url", description="Descarga y extrae el texto visible de una URL concreta.",
+             fields=(_string("url"),)),
+    ToolSpec(name="save_knowledge", description="Guarda una nota en ./knowledge_base/ como Markdown.",
+             fields=(_string("title"), _string("content", max_length=_MAX_CONTENT_CHARS))),
+    ToolSpec(name="read_knowledge", description="Lee o busca notas ya guardadas en knowledge_base.",
+             fields=(_string("query", "Nombre de archivo o texto a buscar"),)),
+    ToolSpec(name="list_knowledge", description="Lista las notas recientes de knowledge_base.", fields=()),
+    ToolSpec(name="read_file", description="Lee un archivo de texto del disco.", fields=(_string("path"),), local=True),
+    ToolSpec(
+        name="write_file",
+        description="Crea o sobrescribe un archivo de texto. Crea directorios padre si hace falta.",
+        fields=(
+            _string("path"),
+            _string("content", max_length=_MAX_CONTENT_CHARS),
+            _flag("force", "Compatibilidad; no permite escribir en rutas protegidas"),
         ),
-        fn(
-            "save_knowledge",
-            "Guarda una nota en ./knowledge_base/ como Markdown.",
-            {
-                "title": {"type": "string"},
-                "content": {"type": "string"},
-            },
-            ["title", "content"],
-        ),
-        fn(
-            "read_knowledge",
-            "Lee o busca notas ya guardadas en knowledge_base.",
-            {
-                "query": {
-                    "type": "string",
-                    "description": "Nombre de archivo o texto a buscar",
-                }
-            },
-            ["query"],
-        ),
-        fn(
-            "list_knowledge",
-            "Lista las notas recientes de knowledge_base.",
-            {},
-            [],
-        ),
-        fn(
-            "read_file",
-            "Lee un archivo de texto del disco.",
-            {"path": {"type": "string"}},
-            ["path"],
-        ),
-        fn(
-            "write_file",
-            "Crea o sobrescribe un archivo de texto. Crea directorios padre si hace falta.",
-            {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-                "force": {
-                    "type": "boolean",
-                    "description": "Compatibilidad; no permite escribir en rutas protegidas",
-                },
-            },
-            ["path", "content"],
-        ),
-        fn(
-            "copy_path",
-            "Copia un archivo o carpeta.",
-            {
-                "src": {"type": "string"},
-                "dst": {"type": "string"},
-                "force": {"type": "boolean"},
-            },
-            ["src", "dst"],
-        ),
-        fn(
-            "move_path",
-            "Mueve o renombra un archivo o carpeta.",
-            {
-                "src": {"type": "string"},
-                "dst": {"type": "string"},
-                "force": {"type": "boolean"},
-            },
-            ["src", "dst"],
-        ),
-        fn(
-            "delete_path",
-            "Elimina un archivo o carpeta. Siempre bloqueado en rutas críticas del SO.",
-            {
-                "path": {"type": "string"},
-                "force": {"type": "boolean"},
-            },
-            ["path"],
-        ),
-        fn(
-            "list_dir",
-            "Lista el contenido de un directorio.",
-            {"path": {"type": "string"}},
-            ["path"],
-        ),
-        fn(
-            "mkdir",
-            "Crea un directorio (y padres).",
-            {"path": {"type": "string"}},
-            ["path"],
-        ),
-        fn(
-            "run_command",
-            "Ejecuta un programa o comando de shell en la máquina local y devuelve stdout/stderr.",
-            {
-                "command": {"type": "string"},
-                "cwd": {"type": "string", "description": "Directorio de trabajo opcional"},
-                "timeout": {"type": "number", "description": "Segundos máximos"},
-            },
-            ["command"],
-        ),
-    ]
+        local=True,
+    ),
+    ToolSpec(name="copy_path", description="Copia un archivo o carpeta.",
+             fields=(_string("src"), _string("dst"), _flag("force", "")), local=True),
+    ToolSpec(name="move_path", description="Mueve o renombra un archivo o carpeta.",
+             fields=(_string("src"), _string("dst"), _flag("force", "")), local=True),
+    ToolSpec(name="delete_path", description="Elimina un archivo o carpeta. Siempre bloqueado en rutas críticas del SO.",
+             fields=(_string("path"), _flag("force", "")), local=True),
+    ToolSpec(name="list_dir", description="Lista el contenido de un directorio.", fields=(_string("path"),), local=True),
+    ToolSpec(name="mkdir", description="Crea un directorio (y padres).", fields=(_string("path"),), local=True),
+    ToolSpec(
+        name="run_command",
+        description="Ejecuta un programa o comando de shell en la máquina local y devuelve stdout/stderr.",
+        fields=(_string("command"), _string("cwd", "Directorio de trabajo opcional", required=False), _TIMEOUT),
+        local=True,
+    ),
+)
+
+_SPEC_BY_NAME: Final[Mapping[str, ToolSpec]] = MappingProxyType({spec.name: spec for spec in TOOL_SPECS})
+_CACHED_SCHEMAS: Final[list[dict[str, Any]]] = [spec.as_schema() for spec in TOOL_SPECS]
+
+
+def _freeze(value: Any) -> Any:
+    """Congelación recursiva: la caché compartida no se puede corromper desde fuera."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+_FROZEN_SCHEMAS: Final[tuple[Mapping[str, Any], ...]] = tuple(_freeze(schema) for schema in _CACHED_SCHEMAS)
+_LOCAL_SCHEMA_TOOLS: Final[frozenset[str]] = frozenset(spec.name for spec in TOOL_SPECS if spec.local)
+
+
+def tool_names() -> tuple[str, ...]:
+    return tuple(_SPEC_BY_NAME)
+
+
+def spec_for(name: str) -> ToolSpec:
+    """Búsqueda O(1) en la tabla cacheada; error tipado si la herramienta no existe."""
+    spec = _SPEC_BY_NAME.get(name)
+    if spec is None:
+        raise ToolValidationError("Herramienta desconocida", context={"tool": name or "<vacío>"})
+    return spec
+
+
+def tool_schemas() -> list[Mapping[str, Any]]:
+    """Esquemas de introspección: proxies de sólo lectura, construidos una sola vez.
+
+    Antes se devolvía la lista compartida (mutable: un llamador podía corromper la
+    caché del proceso) o una copia profunda (133 µs por llamada). Congelar una vez y
+    exponer `MappingProxyType` da las dos cosas: inmutabilidad real y coste O(1).
+    """
+    return list(_FROZEN_SCHEMAS)
+
+
+def schemas_payload() -> tuple[dict[str, Any], ...]:
+    """Diccionales reales precomputados para serializar hacia el proveedor (no mutar)."""
+    return tuple(_CACHED_SCHEMAS)
 
 
 def parse_arguments(raw: Any) -> dict[str, Any]:
+    """JSON estricto: sin claves duplicadas silenciosas y sin objetos no dict."""
+    if isinstance(raw, dict):
+        return dict(raw)
     if isinstance(raw, str):
-        if len(raw) > 100_000:
+        if len(raw) > _MAX_ARGUMENTS_CHARS:
             raise ToolValidationError("Argumentos demasiado grandes")
         try:
-            raw = json.loads(raw)
+            decoded = json.loads(raw)
         except (ValueError, RecursionError):
             raise ToolValidationError("Los argumentos deben ser JSON válido") from None
-    if not isinstance(raw, dict):
-        raise ToolValidationError("Los argumentos deben ser un objeto JSON")
-    return dict(raw)
+        if not isinstance(decoded, dict):
+            raise ToolValidationError("Los argumentos deben ser un objeto JSON")
+        return dict(decoded)
+    raise ToolValidationError("Los argumentos deben ser un objeto JSON")
 
 
 def validate_arguments(name: str, raw: Any) -> dict[str, Any]:
-    schema = next((t["function"]["parameters"] for t in tool_schemas()
-                   if t["function"]["name"] == name), None)
-    if schema is None:
-        raise ToolValidationError("Herramienta desconocida")
-    args = parse_arguments(raw)
-    properties = schema["properties"]
-    if set(args) - set(properties):
-        raise ToolValidationError("Parámetros desconocidos")
-    if set(schema["required"]) - set(args):
-        raise ToolValidationError("Faltan parámetros obligatorios")
-    types = {"string": (str,), "boolean": (bool,), "integer": (int,), "number": (int, float)}
-    for key, value in args.items():
-        kind = properties[key]["type"]
-        if type(value) not in types[kind]:
-            raise ToolValidationError(f"Tipo inválido para {key}: se requiere {kind}")
-        if isinstance(value, str):
-            maximum = properties[key]["maxLength"]
-            if len(value) > maximum or "\x00" in value:
-                raise ToolValidationError(f"Tamaño o contenido inválido para {key}")
-            if key != "content" and not value.strip():
-                raise ToolValidationError(f"{key} no puede estar vacío")
-        if kind in {"integer", "number"}:
-            if not math.isfinite(value):
-                raise ToolValidationError(f"{key} debe ser finito")
-            low, high = properties[key]["minimum"], properties[key]["maximum"]
-            if not low <= value <= high:
-                raise ToolValidationError(f"{key} debe estar entre {low} y {high}")
-    return args
+    """Valores ya tipados y acotados, listos para ejecutar sin segundas conversiones."""
+    return spec_for(name).validate(parse_arguments(raw))

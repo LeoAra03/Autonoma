@@ -153,9 +153,9 @@ httpx==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
     # via autonoma-agent (autonoma-agent/pyproject.toml)
-idna==3.19 \
-    --hash=sha256:5e0811a4383b21dc5838069f801c4fb62113b7447663d2530d2bd6e77b49bf15 \
-    --hash=sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4
+idna==3.20 \
+    --hash=sha256:a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44 \
+    --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
     # via
     #   anyio
     #   httpx
@@ -394,9 +394,14 @@ pytest==9.1.1 \
     # via
     #   autonoma-agent (autonoma-agent/pyproject.toml)
     #   pytest-cov
+    #   pytest-timeout
 pytest-cov==7.1.0 \
     --hash=sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2 \
     --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
+    # via autonoma-agent (autonoma-agent/pyproject.toml)
+pytest-timeout==2.4.0 \
+    --hash=sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a \
+    --hash=sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2
     # via autonoma-agent (autonoma-agent/pyproject.toml)
 rich==14.3.4 \
     --hash=sha256:07e7adb4690f68864777b1450859253bed81a99a31ac321ac1817b2313558952 \

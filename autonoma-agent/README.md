@@ -5,7 +5,13 @@ No es una aplicación web. El perfil prioritario es [Windows con acceso al host]
 
 ## Instalación
 
-Desde este directorio:
+**La vía corta** (no requiere leer nada): desde la raíz del repo, `npm start` —o doble clic en
+`Run-Autonoma.bat` / `./run-autonoma.sh`— crea el entorno, instala el paquete, te pide la clave la
+primera vez y abre el agente. El ejecutable portable (`Autonoma.exe`, sin Python en el destino) se
+arma con `npm run build` o `scripts/build_windows.ps1`. Todo eso está detallado en
+[../INSTALL.md](../INSTALL.md).
+
+Desde este directorio, a mano:
 
 ```bash
 python -m venv .venv
@@ -17,6 +23,22 @@ cp .env.example .env
 # Edita .env localmente; nunca lo publiques.
 python -m autonoma
 ```
+
+Para un artefacto portable (un solo archivo, sin Python instalado en el destino):
+
+```powershell
+# Windows → dist\Autonoma.exe
+powershell -ExecutionPolicy Bypass -File autonoma-agent\scripts\build_windows.ps1
+# (-SkipSmoke omite el autoensayo; el binario siempre se construye onefile)
+```
+
+```bash
+# Linux/macOS → dist/Autonoma (o dist/autonoma.pyz si faltan herramientas de compilación)
+autonoma-agent/scripts/build_portable.sh
+```
+
+Ambos scripts ejecutan `--selftest --json` sobre el artefacto y generan `.sha256`. El `.exe`
+se construye y publica también desde CI (job `windows-executable`); no está firmado.
 
 Playwright es opcional: `pip install ".[browser]"` y `playwright install chromium` instalan el soporte.
 Sin Brave API, se intenta Playwright y después HTML. El paquete define las dependencias y extras en `pyproject.toml`; `requirements.txt` ofrece una
@@ -31,6 +53,7 @@ python -m autonoma --reduced-motion --quiet
 python -m autonoma --help
 python -m autonoma --doctor
 python -m autonoma --doctor --json
+python -m autonoma --selftest --json   # autoensayo del paquete/ejecutable, sin red ni claves
 # Opcional: P global (puede cancelar al escribir en otras aplicaciones)
 python -m autonoma --global-hotkey
 # Solo si aceptas ejecutar shell sin aislamiento:
