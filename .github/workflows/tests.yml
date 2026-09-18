@@ -4,6 +4,7 @@ permissions:
   contents: read
 jobs:
   test:
+    timeout-minutes: 20  # un test colgado debe verse como fallo en minutos, no como 6 horas de CI
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -49,7 +50,7 @@ jobs:
             floor="--cov-fail-under=0"
           fi
           python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch \
-            --cov-report=term-missing $floor 2>&1 | tee /tmp/pytest.log
+            --cov-report=term-missing --timeout=120 $floor 2>&1 | tee /tmp/pytest.log
           code="${PIPESTATUS[0]}"
           set -e
           if [ "$code" -ne 0 ]; then
@@ -73,6 +74,7 @@ jobs:
       - run: pip-audit --require-hashes -r autonoma-agent/requirements-lock.txt
       - run: python -m build autonoma-agent
   windows-executable:
+    timeout-minutes: 25
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

@@ -30,7 +30,7 @@ dependencies = [
 keyboard = ["pynput>=1.7.7,<2"]
 browser = ["playwright>=1.47,<2"]
 build = ["pyinstaller>=6.10,<7"]
-test = ["pytest>=9.0.3,<10", "pytest-cov>=6,<8"]
+test = ["pytest>=9.0.3,<10", "pytest-cov>=6,<8", "pytest-timeout>=2.4,<3"]
 check = ["ruff>=0.6,<1", "mypy>=1.11,<3"]
 
 [project.scripts]

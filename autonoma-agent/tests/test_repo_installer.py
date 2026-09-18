@@ -8,6 +8,7 @@ referencian entre sí con los nombres reales.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -70,6 +71,7 @@ def test_node_wrapper_is_syntactically_valid() -> None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
     assert done.returncode == 0, done.stderr[-400:]
 
@@ -93,7 +95,7 @@ def test_posix_launcher_uses_the_bootstrap_and_honours_python_overrides() -> Non
     assert (REPO_ROOT / "run-autonoma.sh").stat().st_mode & 0o111
 
 
-@pytest.mark.skipif(shutil.which("sh") is None, reason="sin sh")
+@pytest.mark.skipif(shutil.which("sh") is None or os.name == "nt", reason="sin sh POSIX")
 def test_posix_launcher_is_parseable() -> None:
     sh = shutil.which("sh")
     assert sh is not None
@@ -102,6 +104,7 @@ def test_posix_launcher_is_parseable() -> None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
     assert done.returncode == 0, done.stderr[-300:]
 
@@ -126,6 +129,26 @@ def test_build_scripts_wire_the_bundle_step() -> None:
     windows = _read(AGENT / "scripts" / "build_windows.ps1")
     assert "make_bundle.py" in windows and "SkipSmoke" in windows
     assert "Write-Warning" in windows  # un ZIP que no se arma no puede tumbar el build del .exe
+
+
+def test_lock_and_extras_do_not_drift_apart() -> None:
+    """El lock auditado tiene que contener lo que declara el extra `[test]`.
+
+    Si se añade una herramienta de pruebas al manifiesto y no al lock, `locked-linux`
+    falla lejos de aquí con un error opaco; se comprueba la lista, no sólo que existan.
+    """
+    import re
+
+    pyproject = _read(AGENT / "pyproject.toml")
+    extra = re.search(r"test = \[(.*?)\]", pyproject, re.S).group(1)
+    # Se recogen las cadenas "paquete>=x,<y" y se queda con el nombre: partir por comas
+    # mezclaría los especificadores de versión con los nombres de paquete.
+    declared = {re.split(r"[<>=!~\[; ]", req.strip())[0] for req in re.findall(r'"([^"]*)"', extra)}
+    assert declared, "el extra [test] quedó vacío"
+    lock = _read(AGENT / "requirements-lock.txt")
+    pinned = set(re.findall(r"^([A-Za-z0-9._-]+)==", lock, re.M))
+    assert {name.lower() for name in declared} <= pinned, sorted(declared - pinned)
+    assert "pytest-timeout" in pinned  # la puerta anti-colgues del job `test`
 
 
 def test_install_doc_covers_every_distribution_route() -> None:
