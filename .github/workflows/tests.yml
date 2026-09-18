@@ -47,6 +47,19 @@ jobs:
             echo "::error::pytest --collect-only exit=$code (124 = colgado al recolectar) :: $(tail -c 600 /tmp/collect.log | tr '\r\n' '  ')"
           fi
           exit "$code"
+      - name: "Pruebas de la capa nueva (acotadas y con el nombre de cada test)"
+        shell: bash
+        # Los tres archivos nuevos se ejecutan aparte, en crudo y con `-v`: si algo de aquí
+        # bloquea, el paso se llama como su contenido y la última línea nombra el test.
+        run: |
+          set +e
+          timeout 240 python -m pytest autonoma-agent/tests/test_bootstrap.py autonoma-agent/tests/test_portable_bundle.py autonoma-agent/tests/test_repo_installer.py -v --timeout=60 > /tmp/new.log 2>&1
+          code="$?"
+          cat /tmp/new.log
+          if [ "$code" -ne 0 ]; then
+            echo "::error::pruebas nuevas exit=$code (124 = colgado; último nombre del log = test sospechoso) :: $(tail -c 900 /tmp/new.log | tr '\r\n' '  ')"
+          fi
+          exit "$code"
       - name: "Pruebas (puerta de cobertura dura en Linux; medida en Windows)"
         shell: bash
         # En Windows las ramas protegidas por plataforma (grupos de procesos POSIX,
@@ -66,7 +79,7 @@ jobs:
           # Sin `| tee`: si un test deja un hijo huérfano con la tubería abierta, `tee` no ve
           # el EOF y el paso se queda colgado para siempre, más allá de cualquier cota.
           timeout 900 python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch \
-            --cov-report=term-missing --timeout=120 $floor > /tmp/pytest.log 2>&1
+            --cov-report=term-missing -v --timeout=120 $floor > /tmp/pytest.log 2>&1
           code="$?"
           cat /tmp/pytest.log
           set -e
