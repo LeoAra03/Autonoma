@@ -125,7 +125,7 @@ Informe completo: [ENTERPRISE_AUDIT_2026-09.md](ENTERPRISE_AUDIT_2026-09.md). Re
 
 | Comprobación | Resultado |
 | --- | --- |
-| Pruebas | 423 satisfactorias (1 omitida por requerir NTFS real) |
+| Pruebas | 425 satisfactorias (1 omitida por requerir NTFS real) |
 | Cobertura combinada líneas/ramas | 87,3% (umbral exigido 80%) |
 | `mypy --strict` | 0 errores en los 22 módulos del paquete |
 | `ruff check` (selección amplia) | 0 avisos |

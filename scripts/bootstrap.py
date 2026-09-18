@@ -116,14 +116,21 @@ def on_windows() -> bool:
     return os.name == "nt"
 
 
+def explicit_argv(explicit: str) -> list[str]:
+    """Cómo se entiende lo que la gente escribió en `--python` / `AUTONOMA_PYTHON`.
+
+    Si apunta a un archivo que existe se toma tal cual: `shlex.split` se comería las barras
+    invertidas de una ruta de NTFS y partiría cualquier ruta que lleve espacios.
+    Sólo se parte en argumentos lo que es "comando y banderas" (`py -3`).
+    """
+    return [explicit] if Path(explicit).is_file() else shlex.split(explicit)
+
+
 def python_candidates(explicit: str | None, *, windows: bool | None = None) -> list[list[str]]:
     """Lista ordenada de comandos a probar; lo que diga el usuario va primero."""
     out: list[list[str]] = []
     if explicit:
-        # Si apunta a un archivo que existe, se toma tal cual: `shlex.split` se comería las
-        # barras de una ruta de NTFS (C:\Python312 -> C:Python312) y partiría una ruta con
-        # espacios. Como lista sólo se parte lo que es "comando y argumentos" (`py -3`).
-        out.append([explicit] if Path(explicit).is_file() else shlex.split(explicit))
+        out.append(explicit_argv(explicit))
     if on_windows() if windows is None else windows:
         out.extend([[name, "-3"] for name in WINDOWS_LAUNCHER])
     for name in PYTHON_CANDIDATES:
@@ -153,12 +160,26 @@ def current_python(
 
 
 def find_python(explicit: str | None = None) -> tuple[list[str], str]:
-    """Primer Python 3.10+ utilizable, con su versión ya leída."""
-    if not explicit:
-        current = current_python()
-        if current is not None:
-            return current
-    for argv in python_candidates(explicit, windows=None):
+    """Primer Python 3.10+ utilizable, con su versión ya leída.
+
+    Si la persona nombró un intérprete, ése es el contrato: no se responde con otro del PATH
+    a medias — si no levanta, se dice, porque el "usa el de al lado" silencioso es la peor
+    forma de fallar en una instalación.
+    """
+    if explicit:
+        argv = explicit_argv(explicit)
+        version = probe_python(argv)
+        if not version:
+            raise BootstrapError(
+                f"el intérprete que indicaste no responde: {' '.join(argv)}\n"
+                f"  Autonoma necesita Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; comprueba esa ruta\n"
+                "  (pruébala con `--version`) o quita --python para que se busque en el PATH"
+            )
+        return argv, version
+    current = current_python()
+    if current is not None:
+        return current
+    for argv in python_candidates(None, windows=None):
         version = probe_python(argv)
         if version:
             return list(argv), version

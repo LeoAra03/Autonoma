@@ -11,7 +11,7 @@ Baseline auditado: commit `99b4886` (versión 1.1.0) · Sha256 del código origi
 | | antes | después |
 | --- | --- | --- |
 | Puntuación de preparación enterprise | **54 / 100** | **91 / 100** |
-| Sentencias cubiertas (con ramas) | 64 % · 143 pruebas | **87,3 % · 423 pruebas** |
+| Sentencias cubiertas (con ramas) | 64 % · 143 pruebas | **87,3 % · 425 pruebas** |
 | `mypy --strict` | sin configurar | **0 errores en 22 módulos** |
 | `ruff` | `--select F` (sólo errores de nombre) | **selección curada de 20 famílias, 0 avisos** |
 | Excepciones genéricas en el núcleo | 21 × `Exception`/`RuntimeError`/`ValueError` sueltos | **0: taxonomía `AutonomaError` con 14 códigos** |

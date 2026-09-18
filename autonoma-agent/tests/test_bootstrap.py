@@ -57,6 +57,14 @@ def test_an_existing_interpreter_path_is_taken_verbatim(tmp_path: Path) -> None:
     assert bootstrap.python_candidates("py -3")[0] == ["py", "-3"]
 
 
+def test_un_interprete_nominado_que_no_levanta_es_un_error_claro() -> None:
+    """`--python` mandado a un sitio que no funciona no se cambia por otro a escondidas."""
+    with pytest.raises(BootstrapError) as excinfo:
+        bootstrap.find_python("/no/existe/python 3")
+    message = str(excinfo.value)
+    assert "/no/existe/python" in message and "--python" in message
+
+
 def test_a_good_current_interpreter_needs_no_probing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Con un Python que ya cumple en marcha, `find_python` no lanza ni un subprocess."""
 
