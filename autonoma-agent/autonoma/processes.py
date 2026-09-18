@@ -72,8 +72,12 @@ class CommandResult:
 
     def format_for_model(self) -> str:
         """Vista compacta para el modelo: comando, salida y señal de truncado."""
-        parts = [f"$ {self.command_display}", f"exit={self.returncode}", f"cwd={self.cwd}",
-                 f"duracion={self.duration_ms / 1000:.2f}s"]
+        parts = [
+            f"$ {self.command_display}",
+            f"exit={self.returncode}",
+            f"cwd={self.cwd}",
+            f"duracion={self.duration_ms / 1000:.2f}s",
+        ]
         if self.stdout:
             parts.append("--- stdout ---\n" + self.stdout)
         if self.stderr:
@@ -103,7 +107,7 @@ class _TailBuffer:
 
     def _trim(self) -> None:
         joined = "".join(self._chunks)
-        tail = joined[-self._limit:]
+        tail = joined[-self._limit :]
         self._chunks = [tail]
         self._size = len(tail)
 
@@ -113,7 +117,7 @@ class _TailBuffer:
 
     def text(self) -> str:
         """Texto con las últimas `_limit` caracteres."""
-        return "".join(self._chunks)[-self._limit:]
+        return "".join(self._chunks)[-self._limit :]
 
 
 def _drain(stream: Any, buffer: _TailBuffer) -> None:
@@ -194,9 +198,10 @@ class ProcessSupervisor:
         )
         logger.debug(
             "proceso terminado",
-            extra={"event": "process.finished",
-                   "fields": {"exit": result.returncode, "duration_ms": round(elapsed_ms, 1),
-                              "shell": shell}},
+            extra={
+                "event": "process.finished",
+                "fields": {"exit": result.returncode, "duration_ms": round(elapsed_ms, 1), "shell": shell},
+            },
         )
         return result
 
@@ -222,7 +227,7 @@ class ProcessSupervisor:
             "errors": "replace",
             "shell": shell,
         }
-        if os.name == "nt":
+        if _is_windows():
             # El símbolo sólo existe en Windows; se resuelve por atributo para que el
             # chequeo tipado multiplataforma no dependa de constantes ausentes.
             new_group: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -272,6 +277,16 @@ class ProcessSupervisor:
         return stdout_tail, stderr_tail
 
 
+def _is_windows() -> bool:
+    """Único punto donde este módulo pregunta por el sistema operativo.
+
+    Las pruebas sustituyen esta función en lugar de `os.name`: parchear `os.name`
+    cambia también el despacho de `pathlib.Path` (en Windows instantanea `PosixPath`
+    y revienta todo el proceso de pruebas).
+    """
+    return os.name == "nt"
+
+
 def prepare_command(command: str | Sequence[str], *, shell: bool) -> str | list[str]:
     """Normaliza el comando y rechaza lo que `subprocess` aceptaría de forma engañosa."""
     if isinstance(command, str):
@@ -313,7 +328,7 @@ def terminate_process(process: subprocess.Popen[str]) -> None:
     """Termina el árbol: grupo de procesos en POSIX, descendientes conocidos en Windows."""
     if process.poll() is not None:
         return
-    if os.name == "nt":
+    if _is_windows():
         _kill_windows_tree(process)
         return
     killpg = getattr(os, "killpg", None)

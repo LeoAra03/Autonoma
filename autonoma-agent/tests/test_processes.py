@@ -6,9 +6,11 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from autonoma import processes
 from autonoma.errors import ConfigurationError, ProcessLaunchError, ProcessTimeoutError
 from autonoma.filesystem import FileSystemManager
 from autonoma.key_handler import PanicController
@@ -90,7 +92,9 @@ def test_argv_list_requires_shell_false() -> None:
 
 
 def test_crlf_and_bom_are_normalized_in_stdout() -> None:
-    result = run([PY, "-c", "import sys; sys.stdout.buffer.write(b'\\xef\\xbb\\xbflinea1\\r\\nlinea2\\r\\n')"], shell=False)
+    result = run(
+        [PY, "-c", "import sys; sys.stdout.buffer.write(b'\\xef\\xbb\\xbflinea1\\r\\nlinea2\\r\\n')"], shell=False
+    )
     assert result.stdout == "linea1\nlinea2\n"
 
 
@@ -103,19 +107,45 @@ def test_terminate_process_is_idempotent_on_dead_children() -> None:
     terminate_process(process)
 
 
-def test_windows_tree_kill_path_is_skipped_but_consistent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """En POSIX no existe job object: el fallback usa SIGTERM/SIGKILL y nunca deja huérfanos vivos."""
+def test_non_windows_path_kills_without_job_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fuera de Windows no hay job object: se mata por señal y no queda nada vivo."""
     import subprocess
 
     process = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"], start_new_session=True)
     pid = process.pid
-    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(processes, "_is_windows", lambda: False)
     terminate_process(process)
+    _assert_dead(pid)
+
+
+def test_fallback_when_the_platform_has_no_process_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sin `killpg` (plataforma exótica o Windows forzando la rama) se degrada a terminate/kill."""
+    import subprocess
+
+    process = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    pid = process.pid
+    monkeypatch.setattr(processes, "_is_windows", lambda: False)
+    monkeypatch.delattr(os, "killpg", raising=False)
+    monkeypatch.delattr(os, "getpgid", raising=False)
+    terminate_process(process)  # no debe lanzar aunque falte la API de grupos
+    _assert_dead(pid)
+
+
+def test_windows_branch_delegates_to_the_tree_killer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """La rama de Windows se delega en un único helpers; aquí se verifica el enrutado."""
+    calls: list[int] = []
+    monkeypatch.setattr(processes, "_is_windows", lambda: True)
+    monkeypatch.setattr(processes, "_kill_windows_tree", lambda proc: calls.append(proc.pid))
+    terminate_process(SimpleNamespace(pid=4242, poll=lambda: None))
+    assert calls == [4242]
+
+
+def _assert_dead(pid: int) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             return
         time.sleep(0.05)
     pytest.fail("el proceso sobrevivió a terminate_process")

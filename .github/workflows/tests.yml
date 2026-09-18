@@ -41,7 +41,13 @@ jobs:
         run: |
           set +e
           floor=""
-          [ "${{ runner.os }}" = "Windows" ] && floor="--cov-fail-under=0"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # En Windows hay ramas que no se pueden ejecutar (grupos de procesos POSIX,
+            # os.geteuid, symlinks, pynput/X11), así que allí la cobertura se mide pero no
+            # se usa de puerta: el umbral de 80% del proyecto se exige en Linux y en el
+            # job `locked-linux`, donde el árbol completo es alcanzable.
+            floor="--cov-fail-under=0"
+          fi
           python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch \
             --cov-report=term-missing $floor 2>&1 | tee /tmp/pytest.log
           code="${PIPESTATUS[0]}"
