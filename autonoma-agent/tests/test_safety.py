@@ -32,7 +32,7 @@ def test_delete_blocked(tmp_path: Path | None = None) -> None:
     fs = FileSystemManager(panic)
     target = "/etc/hostname" if os.name != "nt" else r"C:\Windows\System32\drivers\etc\hosts"
     try:
-        fs.delete_path(target, force=False, user_prompt="borra algo")
+        fs.delete_path(target, force=False)
         raise AssertionError("debía bloquearse")
     except FileSystemError as exc:
         assert "protegida" in str(exc).lower() or "protegido" in str(exc).lower()

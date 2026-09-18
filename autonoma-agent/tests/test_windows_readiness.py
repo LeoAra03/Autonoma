@@ -80,8 +80,9 @@ def test_doctor_does_not_disclose_secrets(offline_settings, capsys):
     assert any(c['name'] == 'host_access' and c['status'] == 'warning' for c in report['checks'])
 
 
-def test_doctor_bad_url_redacted(offline_settings, capsys):
-    offline_settings.notrack_base_url = 'https://user:secret@example.com'
+def test_doctor_bad_url_redacted(offline_settings, monkeypatch, capsys):
+    from dataclasses import replace
+    monkeypatch.setattr(diagnostics, 'load_settings', lambda: replace(offline_settings, notrack_base_url='https://user:secret@example.com'))
     assert diagnostics.run_diagnostics() == 1
     raw = capsys.readouterr().out
     assert 'secret' not in raw and 'ERROR' in raw
@@ -116,15 +117,22 @@ def test_doctor_rejects_ambiguous_cli(args):
 
 
 def test_doctor_main_no_session(tmp_path, monkeypatch):
+    """`--data-dir` se pasa explícitamente: el entorno del proceso no se muta."""
     monkeypatch.setattr(cli, 'Session', lambda *a, **k: pytest.fail('No iniciar sesión'))
+    monkeypatch.delenv('AUTONOMA_HOME', raising=False)
     called = []
-    monkeypatch.setattr(cli, 'run_diagnostics', lambda **kwargs: called.append(kwargs) or 0)
-    monkeypatch.setenv('AUTONOMA_HOME', 'old')
+
+    def fake_diagnostics(**kwargs):
+        called.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, 'run_diagnostics', fake_diagnostics)
     with pytest.raises(SystemExit) as exc:
         cli.main(['--doctor', '--json', '--data-dir', str(tmp_path)])
     assert exc.value.code == 0
-    assert os.environ['AUTONOMA_HOME'] == str(tmp_path)
-    assert called == [{'as_json': True}]
+    assert called[0]['as_json'] is True
+    assert Path(called[0]['data_root'].path) == tmp_path
+    assert 'AUTONOMA_HOME' not in os.environ
 
 
 def test_global_hotkey_is_opt_in():
@@ -133,15 +141,21 @@ def test_global_hotkey_is_opt_in():
 
 
 def test_failed_session_initialization_cleans_up(offline_settings, monkeypatch):
-    stopped = []
-    monkeypatch.setattr(cli, 'load_settings', lambda: offline_settings)
-    monkeypatch.setattr(cli, '_setup_logging', lambda _: None)
-    monkeypatch.setattr(cli, '_need_key', lambda *a: None)
-    handler = SimpleNamespace(last_error=None, stop=lambda: stopped.append(True), start=lambda: True)
-    monkeypatch.setattr(cli, 'KeyHandler', lambda _: handler)
-    def fail(*a):
+    stopped, closed = [], []
+    monkeypatch.setattr(cli, 'load_settings', lambda **kwargs: offline_settings)
+    monkeypatch.setattr(cli, 'configure_logging', lambda **kwargs: SimpleNamespace(close=lambda: closed.append(True)))
+    handler = SimpleNamespace(
+        status=SimpleNamespace(state=__import__('autonoma.key_handler', fromlist=['x']).ListenerState.STOPPED),
+        stop=lambda: stopped.append(True),
+        start=lambda: SimpleNamespace(running=False, describe=lambda: 'simulado'),
+    )
+    monkeypatch.setattr(cli, 'KeyHandler', lambda *a, **k: handler)
+
+    def fail(*a, **k):
         raise ValueError('bad configuration')
+
     monkeypatch.setattr(cli, 'build_agent', fail)
     with pytest.raises(ValueError):
         cli.Session(SimpleNamespace(), global_hotkey=True)
     assert stopped == [True]
+    assert closed == [True]

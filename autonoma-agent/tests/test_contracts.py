@@ -7,7 +7,8 @@ from autonoma.agent import Agent
 from autonoma.config import Settings
 from autonoma.key_handler import PanicController, PanicError
 from autonoma.notrack_client import NoTrackClient, NoTrackError
-from autonoma.tool_contracts import validate_arguments, tool_schemas, ToolValidationError
+from autonoma.errors import ErrorCode
+from autonoma.tool_contracts import validate_arguments, tool_schemas, ToolValidationError, TOOL_SPECS, spec_for
 from autonoma.tool_registry import ToolRegistry
 
 
@@ -43,9 +44,13 @@ def test_registry_matches_contract():
 def test_no_approval_for_invalid_or_disabled_command():
     approvals = []
     agent = Agent(Settings(), PanicController(), None, None, None, approve=lambda *a: approvals.append(a))
-    assert 'deshabilitados' in agent._dispatch('run_command', {'command': 'echo x'}, user_prompt='')
-    with pytest.raises(ToolValidationError):
-        agent._dispatch('write_file', {'path': ''}, user_prompt='')
+    disabled = agent.run_tool('run_command', {'command': 'echo x'})
+    assert not disabled.ok and 'deshabilitados' in disabled.output
+    assert disabled.error_code is ErrorCode.APPROVAL_REQUIRED
+    invalid = agent.run_tool('write_file', {'path': ''})
+    assert not invalid.ok
+    assert invalid.error_code is ErrorCode.TOOL_CONTRACT
+    # Nada llegó a pedir aprobación: el contrato y la política se cumplen antes.
     assert approvals == []
 
 

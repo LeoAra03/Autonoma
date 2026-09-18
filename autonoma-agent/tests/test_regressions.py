@@ -9,7 +9,8 @@ import pytest
 from autonoma.agent import Agent
 from autonoma.cli import Session, parse_args
 from autonoma.config import Settings, load_settings, save_api_keys
-from autonoma.filesystem import FileSystemError, FileSystemManager
+from autonoma.errors import ErrorCode, ExitCode, FileSystemError, ProcessTimeoutError
+from autonoma.filesystem import FileSystemManager
 from autonoma.key_handler import PanicController
 from autonoma.network import validate_public_url
 from autonoma.search_engine import SearchEngine
@@ -19,35 +20,51 @@ def test_large_process_output():
     fs = FileSystemManager(PanicController())
     command = [sys.executable, '-c', 'import sys; print("x"*200000); sys.stderr.write("y"*200000)']
     result = fs.run_command(command, shell=False, timeout=10)
-    assert result['returncode'] == 0
-    assert len(result['stdout']) == 12000
-    assert len(result['stderr']) == 8000
-    assert not fs._procs
+    assert result.returncode == 0
+    assert len(result.stdout) == 12000
+    assert len(result.stderr) == 8000
+    assert result.truncated
+    assert result.succeeded
+    assert fs.active_processes == 0
 
 
 def test_process_timeout():
     fs = FileSystemManager(PanicController())
-    with pytest.raises(FileSystemError, match='Timeout'):
+    with pytest.raises(ProcessTimeoutError, match='Timeout'):
         fs.run_command([sys.executable, '-c', 'import time; time.sleep(10)'], shell=False, timeout=.1)
-    assert not fs._procs
+    assert fs.active_processes == 0
 
 
-@pytest.mark.parametrize('value', [0, -1, float('nan'), float('inf'), 301])
+@pytest.mark.parametrize('value', [0, -1, float('nan'), float('inf'), 301, 'x'])
 def test_invalid_timeout(value):
-    with pytest.raises(FileSystemError, match='timeout'):
+    with pytest.raises(ProcessTimeoutError, match='timeout'):
         FileSystemManager(PanicController()).run_command('echo test', timeout=value)
 
 
 def test_force_cannot_override(tmp_path):
     fs = FileSystemManager(PanicController(), extra_protected=[str(tmp_path)])
     with pytest.raises(FileSystemError, match='protegida'):
-        fs.write_file(str(tmp_path/'x'), 'no', force=True, user_prompt=str(tmp_path/'x'))
+        fs.write_file(str(tmp_path/'x'), 'no', force=True)
 
 
-@pytest.mark.parametrize('tool', ['run_command', 'read_file', 'write_file', 'delete_path', 'copy_path', 'move_path', 'mkdir', 'list_dir'])
-def test_local_tools_deny_without_approval(tool):
+@pytest.mark.parametrize('tool,args', [
+    ('run_command', {'command': 'echo x'}),
+    ('read_file', {'path': 'x'}),
+    ('write_file', {'path': 'x', 'content': 'y'}),
+    ('delete_path', {'path': 'x'}),
+    ('copy_path', {'src': 'a', 'dst': 'b'}),
+    ('move_path', {'src': 'a', 'dst': 'b'}),
+    ('mkdir', {'path': 'x'}),
+    ('list_dir', {'path': 'x'}),
+])
+def test_local_tools_deny_without_approval(tool, args):
+    """Sin callback de aprobación ninguna herramienta local se ejecuta, con argumentos válidos."""
     agent = Agent(Settings(), PanicController(), None, None, None)
-    assert 'denegada' in agent._dispatch(tool, {}, user_prompt='yes')
+    outcome = agent.run_tool(tool, args, user_prompt='yes')
+    assert not outcome.ok
+    assert 'denegada' in outcome.output
+    assert outcome.error_code is ErrorCode.APPROVAL_REQUIRED
+    assert outcome.requires_approval
 
 
 def test_approved_dispatch(tmp_path):
@@ -107,13 +124,16 @@ def test_config_and_secret_persistence(tmp_path, monkeypatch):
     monkeypatch.delenv('NOTRACK_API_KEY', raising=False)
     env = tmp_path/'.env'
     env.write_text('CUSTOM=keep\n')
-    save_api_keys('secret', env_path=env)
+    saved = save_api_keys('secret', env_path=env)
+    assert saved == {'NOTRACK_API_KEY': 'secret'}
     assert 'CUSTOM=keep' in env.read_text()
     if os.name != 'nt':
         assert env.stat().st_mode & 0o777 == 0o600
     with pytest.raises(ValueError):
         save_api_keys('bad\nINJECT=yes', env_path=env)
-    assert os.environ['NOTRACK_API_KEY'] == 'secret'
+    # Persistir no muta el entorno del proceso: el canal global quedó eliminado.
+    assert 'NOTRACK_API_KEY' not in os.environ
+    assert load_settings(env, tmp_path/'absent.json', ensure_dirs=False).notrack_api_key == 'secret'
     cfg = tmp_path/'config.json'
     cfg.write_text(json.dumps({'http_timeout': 5, 'fetch_pages': 0, 'knowledge_dir': str(tmp_path/'kb'), 'log_dir': str(tmp_path/'logs')}))
     settings = load_settings(env, cfg)
@@ -132,7 +152,7 @@ def test_missing_key_exit_code():
     session = Session.__new__(Session)
     session.agent = SimpleNamespace(notrack=SimpleNamespace(configured=False))
     session.console = SimpleNamespace(print=lambda *a, **k: None)
-    assert session.run_prompt('hello') == 1
+    assert session.run_prompt('hello') == int(ExitCode.CONFIGURATION)
 
 
 def test_frozen_config_location(monkeypatch, tmp_path):

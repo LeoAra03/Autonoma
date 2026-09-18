@@ -78,7 +78,7 @@ def test_notes_and_registry(tmp_path):
     engine = SearchEngine(panic, tmp_path)
     bundle_file = engine.save_findings('topic', [SearchHit('Title', 'https://example.com', 'snippet', extra='extra', content='body')], notes='note')
     assert 'body' in bundle_file.read_text(encoding='utf-8')
-    registry = ToolRegistry(engine, FileSystemManager(panic))
+    registry = ToolRegistry(engine, FileSystemManager(panic), engine.store)
     assert 'Guardado' in registry.execute('save_knowledge', {'title': 'gamma', 'content': 'three'})
     assert 'gamma' in registry.execute('list_knowledge', {})
     assert 'three' in registry.execute('read_knowledge', {'query': 'gamma'})

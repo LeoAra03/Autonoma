@@ -1,8 +1,14 @@
+from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
-from autonoma.cli import Session, _PlainConsole, parse_args
+
+from autonoma.cli import PlainConsole, Session, parse_args
+from autonoma.errors import ExitCode, ProviderUnavailableError
 from autonoma.key_handler import PanicController
-from autonoma.presentation import safe_text, operation_preview
+from autonoma.observability import MetricsRegistry
+from autonoma.presentation import operation_preview, safe_text
+from autonoma.runtime import DataOrigin, DataRoot, RenderPreferences, RuntimeContext
 
 
 def test_controls_are_visible_not_executed():
@@ -41,17 +47,39 @@ def test_noninteractive_denial(monkeypatch):
     assert session.approve('run_command', {}) is False
 
 
-def test_cli_success_and_error_codes(monkeypatch):
-    monkeypatch.setattr('autonoma.cli.RICH', False)
+def _bare_session():
     session = Session.__new__(Session)
     session.panic = PanicController()
-    session.console = _PlainConsole()
+    session.console = PlainConsole()
+    session.context = RuntimeContext(
+        data_root=DataRoot(Path.cwd(), DataOrigin.CHECKOUT),
+        render=RenderPreferences(plain=True),
+    )
+    session.metrics = MetricsRegistry()
+    return session
+
+
+def test_cli_success_and_error_codes():
+    session = _bare_session()
     session.agent = SimpleNamespace(notrack=SimpleNamespace(configured=True), run=lambda *a, **k: 'hola')
-    assert session.run_prompt('hola') == 0
+    assert session.run_prompt('hola') == int(ExitCode.SUCCESS)
+
     def fail(*a, **k):
         raise KeyboardInterrupt()
+
     session.agent.run = fail
-    assert session.run_prompt('hola') != 0
+    assert session.run_prompt('hola') == int(ExitCode.CANCELLED)
     assert session.panic.is_set
+
+
+def test_cli_maps_typed_errors_to_exit_codes():
+    session = _bare_session()
+    session.agent = SimpleNamespace(notrack=SimpleNamespace(configured=True))
+    def provider_fail(*a, **k):
+        raise ProviderUnavailableError('No se pudo conectar con NoTrack')
+    session.agent.run = provider_fail
+    assert session.run_prompt('hola') == int(ExitCode.PROVIDER)
+    session.agent.run = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('secreto-privado'))
+    assert session.run_prompt('hola') == int(ExitCode.INTERNAL)
     assert not parse_args([]).allow_commands
     assert parse_args(['--allow-commands']).allow_commands
