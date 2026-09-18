@@ -180,6 +180,16 @@ class KeyHandler:
             logger.info("Tecla de pánico detectada", extra={"event": "panic.key", "fields": {}})
             self.panic.panic()
 
+    def _build_listener(self) -> Any:
+        """Fábrica del listener: el import perezoso vive aquí y es el único punto sustituirle.
+
+        Separarlo de `start()` permite probar la máquina de estados sin `pynput` ni
+        servidor gráfico, y concentra el fallo de importación en un solo lugar.
+        """
+        from pynput import keyboard  # import perezoso: dependencia opcional
+
+        return keyboard.Listener(on_press=self._on_press, daemon=True)
+
     def start(self) -> ListenerStatus:
         """Arranca el listener en un hilo daemon; nunca bloquea al llamante."""
         with self._lock:
@@ -191,13 +201,7 @@ class KeyHandler:
                 )
                 return self._status
             try:
-                from pynput import keyboard  # import perezoso: dependencia opcional
-            except Exception as exc:  # noqa: BLE001 — opcional por diseño
-                self._status = ListenerStatus(ListenerState.UNAVAILABLE, f"pynput no disponible: {exc}")
-                logger.warning(self._status.reason)
-                return self._status
-            try:
-                listener = keyboard.Listener(on_press=self._on_press, daemon=True)
+                listener = self._build_listener()
                 listener.start()
             except Exception as exc:  # noqa: BLE001 — X11/Wayland/seguridad de entrada
                 self._status = ListenerStatus(

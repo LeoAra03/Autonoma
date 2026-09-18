@@ -9,7 +9,15 @@ import pytest
 from autonoma.agent import Agent
 from autonoma.cli import Session, parse_args
 from autonoma.config import Settings, load_settings, save_api_keys
-from autonoma.errors import ConfigurationError, ErrorCode, ExitCode, FileSystemError, ProcessTimeoutError
+from autonoma.errors import (
+    ConfigurationError,
+    ErrorCode,
+    ExitCode,
+    FileSystemError,
+    NetworkPolicyError,
+    ProcessTimeoutError,
+    SearchBackendError,
+)
 from autonoma.filesystem import FileSystemManager
 from autonoma.key_handler import PanicController
 from autonoma.network import validate_public_url
@@ -105,9 +113,20 @@ def test_fetch_http_error(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "validate_public_url", lambda _: None)
     engine = SearchEngine(PanicController(), tmp_path)
     engine._http = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(404)))
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(SearchBackendError, match="HTTP 404") as excinfo:
         engine.fetch_url("https://example.com")
+    assert excinfo.value.context["host"] == "example.com"
     engine.close()
+    panic = PanicController()
+    engine2 = SearchEngine(panic, tmp_path)
+    def refuse(request):
+        raise httpx.ConnectError("TLS/SSL se cerró al enviar la cabecera Authorization", request=request)
+    engine2._http = httpx.Client(transport=httpx.MockTransport(refuse))
+    with pytest.raises(SearchBackendError) as transport:
+        engine2.fetch_url("https://example.com/x")
+    # El detalle crudo del transporte nunca sube al modelo: sólo el tipo, en el log.
+    assert "Authorization" not in transport.value.user_message()
+    assert isinstance(transport.value.__cause__, httpx.ConnectError)
 
 
 def test_fetch_size_limit(tmp_path, monkeypatch):
@@ -190,7 +209,8 @@ def test_redirect_not_followed(tmp_path, monkeypatch):
         requests.append(request)
         return httpx.Response(302, headers={"location": "http://127.0.0.1"})
     engine._http = httpx.Client(transport=httpx.MockTransport(handle), follow_redirects=True)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(NetworkPolicyError, match="no se siguen redirecciones") as excinfo:
         engine.fetch_url("https://example.com")
-    assert len(requests) == 1
+    assert len(requests) == 1  # ni un solo intento de alcanzar 127.0.0.1
+    assert excinfo.value.context["redirect_host"] == "127.0.0.1"
     engine.close()

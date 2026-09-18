@@ -18,6 +18,21 @@ cp .env.example .env
 python -m autonoma
 ```
 
+Para un artefacto portable (un solo archivo, sin Python instalado en el destino):
+
+```powershell
+# Windows → dist\Autonoma.exe
+powershell -ExecutionPolicy Bypass -File autonoma-agent\scripts\build_windows.ps1 -OneFile
+```
+
+```bash
+# Linux/macOS → dist/Autonoma (o dist/autonoma.pyz si faltan herramientas de compilación)
+autonoma-agent/scripts/build_portable.sh
+```
+
+Ambos scripts ejecutan `--selftest --json` sobre el artefacto y generan `.sha256`. El `.exe`
+se construye y publica también desde CI (job `windows-executable`); no está firmado.
+
 Playwright es opcional: `pip install ".[browser]"` y `playwright install chromium` instalan el soporte.
 Sin Brave API, se intenta Playwright y después HTML. El paquete define las dependencias y extras en `pyproject.toml`; `requirements.txt` ofrece una
 alternativa base y `requirements-test.txt` añade pruebas. Para Linux/Python 3.11 hay un entorno
@@ -31,6 +46,7 @@ python -m autonoma --reduced-motion --quiet
 python -m autonoma --help
 python -m autonoma --doctor
 python -m autonoma --doctor --json
+python -m autonoma --selftest --json   # autoensayo del paquete/ejecutable, sin red ni claves
 # Opcional: P global (puede cancelar al escribir en otras aplicaciones)
 python -m autonoma --global-hotkey
 # Solo si aceptas ejecutar shell sin aislamiento:

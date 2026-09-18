@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -61,13 +62,19 @@ def test_ancestor_guard_protects_the_parent_chain(tmp_path: Path) -> None:
     assert policy.covers(normalize_parts(home / ".ssh" / "id_ed25519"))
 
 
-def test_schemas_are_precomputed_and_isolated() -> None:
+def test_schemas_are_precomputed_and_read_only() -> None:
     assert len(tool_schemas()) == len(TOOL_SPECS)
-    first = tool_schemas()
-    first[0]["function"]["name"] = "mutado"
-    assert all(schema["function"]["name"] != "mutado" for schema in schemas_payload())
+    with pytest.raises(TypeError):  # inmutable de verdad: ni una copia que mutar
+        tool_schemas()[0]["function"]["name"] = "mutado"
+    read_file = next(schema for schema in tool_schemas() if schema["function"]["name"] == "read_file")
+    with pytest.raises(TypeError):  # la congelación es recursiva, no sólo en el nivel superior
+        read_file["function"]["parameters"]["properties"]["path"]["description"] = "mutado"
+    assert read_file["function"]["parameters"]["properties"]["path"]["type"] == "string"
     assert tool_schemas()[0]["function"]["name"] == TOOL_SPECS[0].name
-    assert isinstance(schemas_payload(), tuple)  # la ruta caliente no copia por cada turno
+    assert tool_schemas()[0] is tool_schemas()[0]  # mismo objeto: no se reconstruye por llamada
+    payload = schemas_payload()
+    assert isinstance(payload, tuple) and payload[0]["function"]["name"] == TOOL_SPECS[0].name
+    json.dumps(payload)  # la vista del proveedor es serializable sin copias por turno
 
 
 def test_metrics_registry_lookup_is_not_a_scan() -> None:

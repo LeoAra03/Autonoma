@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal
@@ -242,6 +241,18 @@ TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
 
 _SPEC_BY_NAME: Final[Mapping[str, ToolSpec]] = MappingProxyType({spec.name: spec for spec in TOOL_SPECS})
 _CACHED_SCHEMAS: Final[list[dict[str, Any]]] = [spec.as_schema() for spec in TOOL_SPECS]
+
+
+def _freeze(value: Any) -> Any:
+    """Congelación recursiva: la caché compartida no se puede corromper desde fuera."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+_FROZEN_SCHEMAS: Final[tuple[Mapping[str, Any], ...]] = tuple(_freeze(schema) for schema in _CACHED_SCHEMAS)
 _LOCAL_SCHEMA_TOOLS: Final[frozenset[str]] = frozenset(spec.name for spec in TOOL_SPECS if spec.local)
 
 
@@ -257,13 +268,18 @@ def spec_for(name: str) -> ToolSpec:
     return spec
 
 
-def tool_schemas() -> list[dict[str, Any]]:
-    """Copia profunda defensiva: el llamador puede mutarla sin corromper la caché."""
-    return [deepcopy(schema) for schema in _CACHED_SCHEMAS]
+def tool_schemas() -> list[Mapping[str, Any]]:
+    """Esquemas de introspección: proxies de sólo lectura, construidos una sola vez.
+
+    Antes se devolvía la lista compartida (mutable: un llamador podía corromper la
+    caché del proceso) o una copia profunda (133 µs por llamada). Congelar una vez y
+    exponer `MappingProxyType` da las dos cosas: inmutabilidad real y coste O(1).
+    """
+    return list(_FROZEN_SCHEMAS)
 
 
 def schemas_payload() -> tuple[dict[str, Any], ...]:
-    """Vista congelada (misma lista precomputada) para la ruta caliente: sólo lectura."""
+    """Diccionales reales precomputados para serializar hacia el proveedor (no mutar)."""
     return tuple(_CACHED_SCHEMAS)
 
 

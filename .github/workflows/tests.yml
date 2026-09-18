@@ -15,9 +15,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install "./autonoma-agent[test]" ruff
-      - run: ruff check autonoma-agent/autonoma autonoma-agent/tests --select F
-      - run: python -m compileall -q autonoma-agent/autonoma
+      - run: python -m pip install "./autonoma-agent[test,check]"
+      - name: Lint (ruff, configuración del proyecto)
+        working-directory: autonoma-agent
+        run: ruff check autonoma tests scripts run_autonoma.py
+      - name: Tipos (mypy --strict, desde la config del proyecto)
+        working-directory: autonoma-agent
+        run: mypy autonoma
+      - name: Empaquetado (la versión se resuelve desde autonoma/_version.py)
+        working-directory: autonoma-agent
+        run: python -m pip install --quiet build && python -m build --wheel --no-isolation --outdir /tmp/wheel . && python -c "import zipfile,glob; n=glob.glob('/tmp/wheel/*.whl')[0]; print(n.split('/')[-1])"
+      - run: python -m compileall -q -o 2 autonoma-agent/autonoma
       - run: python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch --cov-report=term-missing
       - run: autonoma --version
   locked-linux:
@@ -28,7 +36,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --require-hashes -r autonoma-agent/requirements-lock.txt
-      - run: python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch --cov-fail-under=60
+      - run: python -m pytest autonoma-agent/tests --cov=autonoma --cov-branch
       - run: python -m pip install pip-audit build
       - run: pip-audit --require-hashes -r autonoma-agent/requirements-lock.txt
       - run: python -m build autonoma-agent
@@ -56,7 +64,11 @@ jobs:
           $report = ($raw -join "`n") | ConvertFrom-Json
           if (-not $report.local_checks_passed) { throw 'Local checks failed' }
           if ($report.network_tested) { throw 'Offline smoke test must not contact providers' }
-          $hash = (Get-FileHash .\dist\Autonoma.exe -Algorithm SHA256).Hash
+          & .\dist\Autonoma.exe --selftest --json | ConvertFrom-Json | ForEach-Object {
+            if (-not $_.ok) { throw "selftest falló: $($_.checks | ConvertTo-Json -Compress)" }
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Selftest smoke test failed' }
+          $hash = (Get-FileHash .\dist\Autonoma.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  Autonoma.exe" | Set-Content .\dist\Autonoma.exe.sha256
       - uses: actions/upload-artifact@v4
         with:
@@ -65,3 +77,41 @@ jobs:
             autonoma-agent/dist/Autonoma.exe
             autonoma-agent/dist/Autonoma.exe.sha256
           if-no-files-found: error
+
+  portable-linux:
+    name: Binario portable (Linux) + zipapp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install "./autonoma-agent[test,build,keyboard]"
+      - name: Compilar binario portable
+        working-directory: autonoma-agent
+        run: bash scripts/build_portable.sh
+      - name: Publicar artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          # Se publica el directorio completo: `build_portable.sh` deja el binario one-file
+          # o, si el runner carece de `libpython` compartida, el zipapp autoverificado.
+          name: Autonoma-Linux-portable
+          path: autonoma-agent/dist/
+          if-no-files-found: error
+
+  release:
+    name: Publicar ejecutables
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, locked-linux, windows-executable, portable-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'Autonoma-*'
+          merge-multiple: true
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

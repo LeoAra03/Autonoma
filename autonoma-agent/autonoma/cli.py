@@ -431,6 +431,10 @@ class Session:
 
     def _cmd_brave(self, _rest: str = "") -> bool:
         value = _read_secret("BRAVE_API_KEY: ")
+        if not value:
+            # Vacío = "no ahora": borrar la clave por un Enter sería destructivo.
+            self.console.print("BRAVE_API_KEY sin cambios.", style="muted")
+            return True
         self.settings = self._persist_keys(brave=value)
         self.rebuild_agent()
         self.console.print("BRAVE_API_KEY actualizada.", style="ok")

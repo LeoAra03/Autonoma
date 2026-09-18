@@ -29,7 +29,13 @@ from urllib.parse import quote_plus, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from autonoma.errors import ProviderContractError, ProviderHttpError, SearchBackendError
+from autonoma.errors import (
+    AutonomaError,
+    NetworkPolicyError,
+    ProviderContractError,
+    ProviderHttpError,
+    SearchBackendError,
+)
 from autonoma.key_handler import PanicController, PanicError
 from autonoma.knowledge import KnowledgeStore
 from autonoma.network import validate_public_url
@@ -478,26 +484,62 @@ class SearchEngine:
 
     # -------------------------------------------------------------- extracción
     def fetch_url(self, url: str, limit: int = _TEXT_LIMIT) -> str:
-        """Descarga un destino público sin seguir redirecciones y con tope de bytes."""
+        """Descarga un destino público sin seguir redirecciones y con tope de bytes.
+
+        Los fallos de transporte y de estado se convierten en errores del proyecto:
+        el llamador (y el modelo) reciben una explicación accionable, no un trazado
+        de `httpx` con la URL o la cabecera dentro.
+        """
         self.panic.check()
         validate_public_url(url)
         client = self._ensure_client()
-        # `follow_redirects=False` también por petición: un cliente compartido mal
-        # configurado no debe poder redirigir hacia la red local.
-        with client.stream(
-            "GET", url, headers={"Accept": "text/html,text/plain"}, follow_redirects=False
-        ) as response:
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").lower()
-            if not any(kind in content_type for kind in ("html", "xml", "text")):
-                return f"[contenido no textual: {content_type or 'desconocido'}]"
-            body = bytearray()
-            for chunk in response.iter_bytes(chunk_size=8192):
-                self.panic.check()
-                body.extend(chunk)
-                if len(body) > _MAX_PAGE_BYTES:
-                    raise ValueError(f"Página demasiado grande (máximo {_MAX_PAGE_BYTES} bytes)")
-            return visible_text(body.decode(response.encoding or "utf-8", errors="replace"), limit=limit)
+        try:
+            # `follow_redirects=False` también por petición: un cliente compartido mal
+            # configurado no debe poder redirigir hacia la red local.
+            with client.stream(
+                "GET", url, headers={"Accept": "text/html,text/plain"}, follow_redirects=False
+            ) as response:
+                if 300 <= response.status_code < 400:
+                    # Política de egreso: una redirección puede apuntar a la red local,
+                    # así que se informa del destino pero nunca se persigue.
+                    location = response.headers.get("location", "")
+                    raise NetworkPolicyError(
+                        f"El destino redirige (HTTP {response.status_code}); no se siguen redirecciones",
+                        context={
+                            "host": urlparse(url).netloc,
+                            "status": response.status_code,
+                            "redirect_host": urlparse(location, url).netloc,
+                        },
+                    )
+                if response.status_code >= 400:
+                    raise SearchBackendError(
+                        f"El destino respondió HTTP {response.status_code}",
+                        failures=(("fetch", f"HTTP {response.status_code}"),),
+                        context={"host": urlparse(url).netloc, "status": response.status_code},
+                    )
+                content_type = response.headers.get("content-type", "").lower()
+                if not any(kind in content_type for kind in ("html", "xml", "text")):
+                    return f"[contenido no textual: {content_type or 'desconocido'}]"
+                body = bytearray()
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    self.panic.check()
+                    body.extend(chunk)
+                    if len(body) > _MAX_PAGE_BYTES:
+                        raise NetworkPolicyError(
+                            f"Página demasiado grande (máximo {_MAX_PAGE_BYTES} bytes)",
+                            context={"limit": _MAX_PAGE_BYTES},
+                        )
+                return visible_text(body.decode(response.encoding or "utf-8", errors="replace"), limit=limit)
+        except AutonomaError:
+            raise
+        except (PanicError, KeyboardInterrupt):
+            raise
+        except httpx.HTTPError as exc:
+            raise SearchBackendError(
+                "No se pudo descargar el destino; la conexión falló antes de leer el contenido",
+                failures=(("fetch", type(exc).__name__),),
+                context={"host": urlparse(url).netloc},
+            ) from exc
 
     def _fetch_or_error(self, url: str, limit: int) -> str:
         try:

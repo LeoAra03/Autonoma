@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "Agente local de terminal con aprobación humana de herramientas"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "LicenseRef-Private-Personal"
+# Sin `license`: repo privado de uso personal, sin archivo LICENSE. Declararlo con la
+# forma SPDX exige setuptools>=77 y rompería entornos antiguos (p. ej. Debian 12).
 keywords = ["agente", "terminal", "autonomia", "offline-first"]
 classifiers = [
   "Environment :: Console",
@@ -128,7 +129,6 @@ warn_unreachable = true
 # Los `# type: ignore` sin usar son deuda: fallan en CI.
 warn_unused_ignores = true
 files = ["autonoma"]
-mypy_path = "."
 
 [[tool.mypy.overrides]]
 # Dependencias opcionales: sin stubs publicados y ausentes en entornos mínimos.
