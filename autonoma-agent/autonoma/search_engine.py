@@ -29,7 +29,7 @@ from urllib.parse import quote_plus, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from autonoma.errors import SearchBackendError
+from autonoma.errors import ProviderContractError, ProviderHttpError, SearchBackendError
 from autonoma.key_handler import PanicController, PanicError
 from autonoma.knowledge import KnowledgeStore
 from autonoma.network import validate_public_url
@@ -186,11 +186,17 @@ class BraveApiBackend(_HttpBacked):
         )
         self.panic.check()
         if response.status_code >= 400:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:240]}")
+            # El cuerpo del error va sólo al `context` (redactado en el log): puede reenviar
+            # la consulta o fragmentos de la cabecera de autenticación.
+            raise ProviderHttpError(
+                f"Brave respondió HTTP {response.status_code}",
+                status_code=response.status_code,
+                context={"body": response.text[:240]},
+            )
         payload = response.json()
         results = (payload.get("web") or {}).get("results") or []
         if not isinstance(results, list):
-            raise RuntimeError("respuesta de Brave sin lista `web.results`")
+            raise ProviderContractError("respuesta de Brave sin lista `web.results`")
         return tuple(_hit_from_api(item) for item in results[:count])
 
 
@@ -348,7 +354,8 @@ class SearchEngine:
             return self._http
 
     def close(self) -> None:
-        """Cierra el cliente HTTP (seguro desde el hilo de pánico)."""
+        """Cierra el cliente HTTP (seguro desde el hilo de pánico) y su registro de limpieza."""
+        self.panic.unregister_cleanup(self.close)
         client = self._http
         self._http = None
         if client is not None and not client.is_closed:
@@ -420,7 +427,10 @@ class SearchEngine:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            raise RuntimeError(f"playwright no instalado ({exc})") from exc
+            raise SearchBackendError(
+                "playwright no instalado; instala el extra [browser] o usa la API de Brave",
+                failures=(("playwright", "importación ausente"),),
+            ) from exc
         self.panic.check()
         with self._browser_lock:
             runtime = sync_playwright().start()
@@ -431,7 +441,11 @@ class SearchEngine:
                 launch_kwargs["executable_path"] = brave
             try:
                 browser = runtime.chromium.launch(**launch_kwargs)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — el navegador del sistema puede rechazar `executable_path`
+                logger.debug(
+                    "lanzamiento con executable_path falló; se reintenta sin él",
+                    extra={"event": "search.browser_fallback", "fields": {"launcher": type(exc).__name__}},
+                )
                 browser = runtime.chromium.launch(headless=True)
             self._browser = browser
         try:
@@ -448,7 +462,11 @@ class SearchEngine:
             page.goto(f"{BRAVE_WEB_URL}?q={quote_plus(query)}", wait_until="domcontentloaded")
             try:
                 page.wait_for_selector("div.snippet, a.result-header, #results", timeout=8000)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — selectores del SERP cambian: se degrada a una espera fija
+                logger.debug(
+                    "selector de resultados no apareció; se usa espera fija",
+                    extra={"event": "search.selector_miss", "fields": {"error": type(exc).__name__}},
+                )
                 page.wait_for_timeout(1500)
             self.panic.check()
             return str(page.content())
@@ -490,7 +508,7 @@ class SearchEngine:
             return f"(no se pudo extraer: {_reason(exc)})"
 
     # ------------------------------------------------------------- investigación
-    def research(self, query: str, fetch_pages: int | None = None, save: bool = True) -> ResearchBundle:
+    def research(self, query: str, fetch_pages: int | None = None, *, save: bool = True) -> ResearchBundle:
         """Busca, descarga en paralelo las páginas top y guarda una nota."""
         self.panic.check()
         pages = clamp_fetch_pages(self.fetch_pages if fetch_pages is None else int(fetch_pages))

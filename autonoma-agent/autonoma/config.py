@@ -24,10 +24,10 @@ from autonoma.runtime import DataOrigin, DataRoot, RenderPreferences, RuntimeCon
 __all__ = [
     "DEFAULT_NOTRACK_BASE_URL",
     "DEFAULT_NOTRACK_MODEL",
+    "NUMERIC_BOUNDS",
     "DotEnvFile",
     "DotEnvStatus",
     "NumericBound",
-    "NUMERIC_BOUNDS",
     "Settings",
     "context_for",
     "dump_public_config",
@@ -92,12 +92,12 @@ class NumericBound:
             try:
                 value: int | float = int(text)
             except ValueError as exc:
-                raise self._invalid(raw, exc) from exc
+                raise self._invalid(raw) from exc
         else:
             try:
                 value = float(text)
             except ValueError as exc:
-                raise self._invalid(raw, exc) from exc
+                raise self._invalid(raw) from exc
         if not math.isfinite(value) or not self.minimum <= value <= self.maximum:
             raise ConfigurationError(
                 f"Configuración inválida: {self.name} debe estar entre {self.minimum:g} y {self.maximum:g}",
@@ -105,7 +105,7 @@ class NumericBound:
             )
         return value
 
-    def _invalid(self, raw: str, cause: Exception) -> ConfigurationError:
+    def _invalid(self, raw: str) -> ConfigurationError:
         return ConfigurationError(
             f"Configuración inválida: {self.name} debe ser {self.kind}",
             context={"setting": self.name, "received": (raw or "").strip() or "<vacío>"},
@@ -183,7 +183,7 @@ class Settings:
             brave_api_key=self.brave_api_key if brave is None else brave.strip(),
         )
 
-    def with_allow_commands(self, allow: bool) -> Settings:
+    def with_allow_commands(self, *, allow: bool) -> Settings:
         return replace(self, allow_commands=bool(allow))
 
     def with_root(self, root: Path) -> Settings:
@@ -271,8 +271,7 @@ def _write_dotenv_file(path: Path, updates: Mapping[str, str]) -> None:
         ) from exc
     finally:
         with contextlib.suppress(OSError):
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            Path(temporary).unlink(missing_ok=True)
 
 
 def load_json_config(path: Path) -> Mapping[str, Any]:

@@ -40,18 +40,16 @@ def test_trace_scope_generates_and_restores() -> None:
 
 
 def test_trace_scope_restores_on_exception() -> None:
-    with pytest.raises(RuntimeError):
-        with trace_scope():
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), trace_scope():
+        raise RuntimeError("boom")
     assert current_trace_id() == ""
 
 
 def test_json_formatter_emits_flat_structured_record(captured: pytest.LogCaptureFixture) -> None:
     formatter = JsonLogFormatter(version="test")
     logger = logging.getLogger("autonoma.test.json")
-    with trace_scope("trc-aaaaaaaa"):
-        with captured.at_level(logging.INFO, logger="autonoma.test.json"):
-            log_event(logger, logging.INFO, "tool.write_file", {"tool": "write_file", "path": "/tmp/a"})
+    with trace_scope("trc-aaaaaaaa"), captured.at_level(logging.INFO, logger="autonoma.test.json"):
+        log_event(logger, logging.INFO, "tool.write_file", {"tool": "write_file", "path": "/tmp/a"})
     record = captured.records[-1]
     payload = json.loads(formatter.format(record))
     assert payload["trace_id"] == "trc-aaaaaaaa"
@@ -86,7 +84,7 @@ def test_configure_logging_writes_json_and_redacts(tmp_path: Path) -> None:
     assert payload["event"] == "config.read"
     assert secret not in lines[-1]
     assert payload["trace_id"].startswith("trc-")
-    ours = set(id(handler) for handler in runtime.handlers)
+    ours = {id(handler) for handler in runtime.handlers}
     assert ours.isdisjoint({id(handler) for handler in logging.getLogger().handlers})  # sin handlers huérfanos
 
 
@@ -130,9 +128,8 @@ def test_measure_records_success_and_reraises_typed_failure() -> None:
     with measure(metrics, "tool.x", fields={"tool": "x"}) as outcome:
         value = 1
     assert outcome.ok and value == 1
-    with pytest.raises(FileSystemError):
-        with measure(metrics, "tool.x", fields={"tool": "x"}) as failed:
-            raise FileSystemError("no se pudo")
+    with pytest.raises(FileSystemError), measure(metrics, "tool.x", fields={"tool": "x"}) as failed:
+        raise FileSystemError("no se pudo")
     assert failed.status is OutcomeStatus.ERROR and failed.error_code is ErrorCode.FILESYSTEM_IO
     counters = metrics.counters()
     assert counters["tool.x.success"] == 1
@@ -142,9 +139,8 @@ def test_measure_records_success_and_reraises_typed_failure() -> None:
 
 def test_measure_does_not_swallow_cancellation() -> None:
     metrics = MetricsRegistry()
-    with pytest.raises(KeyboardInterrupt):
-        with measure(metrics, "turn"):
-            raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt), measure(metrics, "turn"):
+        raise KeyboardInterrupt
     assert metrics.counters().get("turn.failure.internal") == 1
 
 

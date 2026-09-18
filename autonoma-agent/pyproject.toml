@@ -4,10 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonoma-agent"
-version = "1.1.0"
+dynamic = ["version"]
 description = "Agente local de terminal con aprobación humana de herramientas"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "LicenseRef-Private-Personal"
+keywords = ["agente", "terminal", "autonomia", "offline-first"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Utilities",
+]
 dependencies = [
   "httpx>=0.27,<1",
   "rich>=13.7,<15",
@@ -21,6 +30,7 @@ keyboard = ["pynput>=1.7.7,<2"]
 browser = ["playwright>=1.47,<2"]
 build = ["pyinstaller>=6.10,<7"]
 test = ["pytest>=9.0.3,<10", "pytest-cov>=6,<8"]
+check = ["ruff>=0.6,<1", "mypy>=1.11,<3"]
 
 [project.scripts]
 autonoma = "autonoma.cli:main"
@@ -28,5 +38,115 @@ autonoma = "autonoma.cli:main"
 [tool.setuptools.packages.find]
 include = ["autonoma*"]
 
+[tool.setuptools.dynamic]
+# Fuente única de versión: se lee por AST, sin importar el paquete al construir.
+version = { attr = "autonoma._version.__version__" }
+
+[tool.setuptools.package-data]
+autonoma = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-q --strict-markers"
+xfail_strict = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["autonoma", "tests"]
+
+[tool.ruff.lint]
+# Selección deliberada: corrección, claridad y seguridad. `ALL` incluye reglas de
+# gustos que obligarían a_commentar el código en vez de mejorarlo.
+select = [
+  "E", "W", "F", "I",      # errores de sintaxis, estilo, orden de imports
+  "UP",                    # sintaxis moderna (pep604, f-strings, `Type`)
+  "B",                     # bugbear: fallos reales (bucle closures, `==` de tipos, etc.)
+  "C4", "PERF", "SIM", "RET", "PIE",  # colecciones, bucles y retornos tempranos
+  "RUF",                   # coherencia propia de ruff (`__all__`, noqa sin usar)
+  "ANN",                   # anotaciones en toda la firma pública
+  "TRY", "EM", "BLE",       # errores tipados, mensajes fuera del raise, ningún `except` silencioso
+  "ARG", "SLF", "PLC",     # firmas limpias, sin acceso a privados entre capas
+  "PLE", "PLW0603", "PLR0124", "PLR1714", "PLR1722",  # subconjunto de pylint que sí pinta
+  "PTH", "S", "DTZ", "INP",  # paths, seguridad, sin fechas naives, paquetes
+  "PT",                    # aserciones de pytest coherentes
+  "FBT",                   # booleanos como palabra clave
+]
+ignore = [
+  "ANN401",    # `**kwargs` de consola: compatibilidad con `rich.console.Console.print`
+  "B008",      # `Path(...)` en valores por defecto de tests: legibilidad sobre dogma
+  "COM812",    # la coma final la decide el formateador, no el linter
+  "E501",      # longitud: se gestiona con `ruff format`; ver `line-length`
+  "EM101",     # literales en la excepción: el mensaje se construye para el usuario
+  "EM102",     # f-strings en la excepción: legible y el detalle va además al log
+  "PERF203",   # `try` dentro de bucle: necesario en el drenaje de tuberías y SSE
+  "PLC0415",   # imports locales deliberados (playwright/pynput/rich son opcionales)
+  "PT011",     # `pytest.raises` amplio en pruebas de frontera intencional
+  "PT018",     # aserciones compuestas: dan mejor contexto de fallo en estos tests
+  "RUF001",    # español con tildes: no hay caracteres ambiguos reales
+  "RUF002",
+  "RUF003",
+  "TRY003",    # mensajes largos y accionables en la excepción son la política del proyecto
+  "TRY300",    # `else` tras `try` reduciría la indentación pero separa el retorno del éxito
+  "TRY301",    # `raise ... inside try` deliberado: se captura para reenvolver el error
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.flake8-builtins]
+builtins-ignorelist = ["id", "type", "format", "input", "print"]
+
+[tool.ruff.lint.per-file-ignores]
+# Cada excepción está acotada al módulo que decide hacerlo así, no a todo el paquete.
+"autonoma/cli.py" = ["ARG002", "S603", "SLF001", "T201"]
+# Escritura atómica de `.env`/`config.json`: `os.chmod` antes de `os.replace` para que
+# el secreto nunca exista en el temporal con permisos heredados. `Path` no ofrece ese orden.
+"autonoma/config.py" = ["PTH101", "PTH105"]
+"autonoma/diagnostics.py" = ["T201"]
+"autonoma/filesystem.py" = ["PTH101", "PTH105", "PTH108", "S603"]
+"autonoma/network.py" = ["S", "TRY400"]
+"autonoma/notrack_client.py" = ["FBT001", "FBT002", "PLR0913"]
+"autonoma/presentation.py" = ["T201"]
+"autonoma/processes.py" = ["S603", "S607"]
+"autonoma/search_engine.py" = ["FBT001", "FBT002", "PLR0913", "TRY400"]
+"autonoma/agent.py" = ["PLR0913", "TRY400"]
+"autonoma/tool_registry.py" = ["ARG002"]
+"run_autonoma.py" = ["INP001"]
+"tests/*" = [
+  "ANN", "ARG001", "ARG002", "ARG005", "B011", "E402", "FBT001", "FBT003", "PLR0913", "PT006", "PT017",
+  "S101", "S105", "S106", "S108", "S603", "S604", "SLF001", "T201",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["autonoma"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+# Los `# type: ignore` sin usar son deuda: fallan en CI.
+warn_unused_ignores = true
+files = ["autonoma"]
+mypy_path = "."
+
+[[tool.mypy.overrides]]
+# Dependencias opcionales: sin stubs publicados y ausentes en entornos mínimos.
+module = ["pynput.*", "psutil.*", "playwright.*", "PyInstaller.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+source = ["autonoma"]
+
+[tool.coverage.report]
+# 60 era el suelo histórico; el refactor documenta y prueba 80 como contrato.
+fail_under = 80
+show_missing = true
+precision = 1
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "except ImportError",
+  "raise NotImplementedError",
+]

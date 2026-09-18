@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from autonoma.errors import ProcessLaunchError, ProcessTimeoutError
+from autonoma.errors import ConfigurationError, ProcessLaunchError, ProcessTimeoutError
 from autonoma.key_handler import PanicController
 
 __all__ = ["CommandResult", "ProcessSupervisor"]
@@ -201,7 +201,8 @@ class ProcessSupervisor:
         return result
 
     def kill_all(self) -> None:
-        """Termina el árbol de todos los procesos vivos (limpieza de pánico)."""
+        """Termina el árbol de todos los procesos vivos y se desregistra del pánico."""
+        self._panic.unregister_cleanup(self.kill_all)
         with self._lock:
             processes = list(self._active)
         for process in processes:
@@ -215,7 +216,9 @@ class ProcessSupervisor:
             "stderr": subprocess.PIPE,
             "stdin": subprocess.DEVNULL,
             "text": True,
-            "encoding": "utf-8",
+            # utf-8-sig: quita un BOM inicial si el programa imprime UTF-8 con BOM
+            # (típico en herramientas de Windows) sin penalizar el UTF-8 normal.
+            "encoding": "utf-8-sig",
             "errors": "replace",
             "shell": shell,
         }
@@ -292,9 +295,10 @@ def _validated_timeout(value: float) -> float:
     try:
         timeout = float(value)
     except (TypeError, ValueError) as exc:
-        raise ProcessTimeoutError("timeout debe ser numérico") from exc
+        # Un timeout inválido es configuración mal formada, no un plazo agotado.
+        raise ConfigurationError("timeout debe ser numérico") from exc
     if not math.isfinite(timeout) or not _MIN_TIMEOUT_SECONDS <= timeout <= _MAX_TIMEOUT_SECONDS:
-        raise ProcessTimeoutError(
+        raise ConfigurationError(
             f"timeout debe estar entre {_MIN_TIMEOUT_SECONDS:g} y {_MAX_TIMEOUT_SECONDS:g} segundos",
             context={"received": str(value)},
         )

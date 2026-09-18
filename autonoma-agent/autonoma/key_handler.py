@@ -103,8 +103,10 @@ class PanicController:
                 self._cleanups.append(cleanup)
 
     def unregister_cleanup(self, cleanup: Cleanups) -> None:
+        """Comparación por igualdad, no por identidad: `obj.close` crea un bound method nuevo
+        en cada acceso, y con `is` la limpieza quedaría registrada para siempre."""
         with self._lock:
-            self._cleanups = [item for item in self._cleanups if item is not cleanup]
+            self._cleanups = [item for item in self._cleanups if item != cleanup]
 
     def on_panic(self, hook: Cleanups) -> None:
         with self._lock:

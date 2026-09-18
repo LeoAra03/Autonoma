@@ -147,7 +147,7 @@ class DurationSummary:
 def _percentile(ordered: Sequence[float], fraction: float) -> float:
     if not ordered:
         return 0.0
-    index = min(len(ordered) - 1, max(0, int(round(fraction * (len(ordered) - 1)))))
+    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
     return ordered[index]
 
 
@@ -324,7 +324,7 @@ class _TraceIdFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "autonoma_trace_id"):
-            record.autonoma_trace_id = current_trace_id()  # type: ignore[attr-defined]
+            record.autonoma_trace_id = current_trace_id()
         return True
 
 

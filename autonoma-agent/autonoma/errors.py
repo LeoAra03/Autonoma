@@ -77,9 +77,13 @@ class ErrorCode(str, Enum):
     INTERNAL = "internal"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ErrorTraits:
-    """Metadatos declarativos por código de error: sin `if/else` dispersos."""
+    """Metadatos declarativos por código de error: sin `if/else` dispersos.
+
+    Campos sólo por palabra clave: `True` en la tercera o cuarta posición sería
+    indistinguible del resto de banderas al leer la tabla.
+    """
 
     severity: int
     retryable: bool
@@ -89,46 +93,74 @@ class ErrorTraits:
 
 _TRAITS: Final[Mapping[ErrorCode, ErrorTraits]] = {
     ErrorCode.CONFIGURATION: ErrorTraits(
-        logging.ERROR, False, ExitCode.CONFIGURATION, "Corrige .env o config.json y vuelve a iniciar."
+        severity=logging.ERROR, retryable=False,
+        exit_code=ExitCode.CONFIGURATION,
+        hint="Corrige .env o config.json y vuelve a iniciar.",
     ),
     ErrorCode.TOOL_CONTRACT: ErrorTraits(
-        logging.WARNING, False, ExitCode.INTERNAL, "La herramienta se rechazó antes de ejecutarse; reformula la instrucción."
+        severity=logging.WARNING, retryable=False,
+        exit_code=ExitCode.INTERNAL,
+        hint="La herramienta se rechazó antes de ejecutarse; reformula la instrucción.",
     ),
     ErrorCode.APPROVAL_REQUIRED: ErrorTraits(
-        logging.INFO, False, ExitCode.APPROVAL_REQUIRED, "Requiere aprobación humana explícita en una TTY interactiva."
+        severity=logging.INFO, retryable=False,
+        exit_code=ExitCode.APPROVAL_REQUIRED,
+        hint="Requiere aprobación humana explícita en una TTY interactiva.",
     ),
     ErrorCode.PATH_POLICY: ErrorTraits(
-        logging.WARNING, False, ExitCode.FILESYSTEM, "Usa rutas absolutas de unidad sin enlaces simbólicos ni reparse points."
+        severity=logging.WARNING, retryable=False,
+        exit_code=ExitCode.FILESYSTEM,
+        hint="Usa rutas absolutas de unidad sin enlaces simbólicos ni reparse points.",
     ),
     ErrorCode.FILESYSTEM_IO: ErrorTraits(
-        logging.ERROR, False, ExitCode.FILESYSTEM, "Revisa permisos y existencia de la ruta; el agente no reintenta operaciones destructivas."
+        severity=logging.ERROR, retryable=False,
+        exit_code=ExitCode.FILESYSTEM,
+        hint="Revisa permisos y existencia de la ruta; el agente no reintenta operaciones destructivas.",
     ),
     ErrorCode.PROCESS_LAUNCH: ErrorTraits(
-        logging.ERROR, False, ExitCode.FILESYSTEM, "El programa no existe o no puede iniciarse en ese directorio."
+        severity=logging.ERROR, retryable=False,
+        exit_code=ExitCode.FILESYSTEM,
+        hint="El programa no existe o no puede iniciarse en ese directorio.",
     ),
     ErrorCode.PROCESS_TIMEOUT: ErrorTraits(
-        logging.WARNING, True, ExitCode.FILESYSTEM, "Aumenta timeout o divide el trabajo; el árbol del proceso fue terminado."
+        severity=logging.WARNING, retryable=True,
+        exit_code=ExitCode.FILESYSTEM,
+        hint="Aumenta timeout o divide el trabajo; el árbol del proceso fue terminado.",
     ),
     ErrorCode.NETWORK_POLICY: ErrorTraits(
-        logging.WARNING, False, ExitCode.NETWORK, "Solo se permiten destinos HTTP(S) públicos en puertos estándar."
+        severity=logging.WARNING, retryable=False,
+        exit_code=ExitCode.NETWORK,
+        hint="Solo se permiten destinos HTTP(S) públicos en puertos estándar.",
     ),
     ErrorCode.PROVIDER_UNAVAILABLE: ErrorTraits(
-        logging.ERROR, True, ExitCode.PROVIDER, "Verifica la conexión y la URL del proveedor; reintenta más tarde."
+        severity=logging.ERROR, retryable=True,
+        exit_code=ExitCode.PROVIDER,
+        hint="Verifica la conexión y la URL del proveedor; reintenta más tarde.",
     ),
     ErrorCode.PROVIDER_HTTP: ErrorTraits(
-        logging.ERROR, False, ExitCode.PROVIDER, "Revisa la clave/cuota del proveedor con /key y /status."
+        severity=logging.ERROR, retryable=False,
+        exit_code=ExitCode.PROVIDER,
+        hint="Revisa la clave/cuota del proveedor con /key y /status.",
     ),
     ErrorCode.PROVIDER_CONTRACT: ErrorTraits(
-        logging.ERROR, True, ExitCode.PROVIDER, "La respuesta no cumple el contrato; reintenta o cambia de modelo."
+        severity=logging.ERROR, retryable=True,
+        exit_code=ExitCode.PROVIDER,
+        hint="La respuesta no cumple el contrato; reintenta o cambia de modelo.",
     ),
     ErrorCode.SEARCH_BACKEND: ErrorTraits(
-        logging.WARNING, True, ExitCode.SEARCH, "Ningún backend de búsqueda respondió; agrega BRAVE_API_KEY para mayor fiabilidad."
+        severity=logging.WARNING, retryable=True,
+        exit_code=ExitCode.SEARCH,
+        hint="Ningún backend de búsqueda respondió; agrega BRAVE_API_KEY para mayor fiabilidad.",
     ),
     ErrorCode.CANCELLED: ErrorTraits(
-        logging.INFO, True, ExitCode.CANCELLED, "Tarea detenida por el usuario; el estado en disco puede estar parcial."
+        severity=logging.INFO, retryable=True,
+        exit_code=ExitCode.CANCELLED,
+        hint="Tarea detenida por el usuario; el estado en disco puede estar parcial.",
     ),
     ErrorCode.INTERNAL: ErrorTraits(
-        logging.ERROR, False, ExitCode.INTERNAL, "Falla interna; revisa logs/autonoma.log con el trace_id indicado."
+        severity=logging.ERROR, retryable=False,
+        exit_code=ExitCode.INTERNAL,
+        hint="Falla interna; revisa logs/autonoma.log con el trace_id indicado.",
     ),
 }
 

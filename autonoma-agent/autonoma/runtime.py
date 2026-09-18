@@ -168,7 +168,7 @@ class RuntimeContext:
     def use_rich(self) -> bool:
         return self.render.use_rich
 
-    def with_allow_commands(self, allow: bool) -> RuntimeContext:
+    def with_allow_commands(self, *, allow: bool) -> RuntimeContext:
         return replace(self, allow_commands=allow)
 
     def with_render(self, **changes: bool) -> RuntimeContext:

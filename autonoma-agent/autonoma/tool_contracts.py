@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal
@@ -26,8 +27,8 @@ __all__ = [
     "ToolValidationError",
     "parse_arguments",
     "spec_for",
-    "tool_schemas",
     "tool_names",
+    "tool_schemas",
     "validate_arguments",
 ]
 
@@ -257,13 +258,13 @@ def spec_for(name: str) -> ToolSpec:
 
 
 def tool_schemas() -> list[dict[str, Any]]:
-    """Esquema enviado al modelo: lista precomputada, copia superficial defensiva."""
-    return [dict(schema) for schema in _CACHED_SCHEMAS]
+    """Copia profunda defensiva: el llamador puede mutarla sin corromper la caché."""
+    return [deepcopy(schema) for schema in _CACHED_SCHEMAS]
 
 
-def schemas_payload() -> list[dict[str, Any]]:
-    """Versión para serializar una sola vez por turno (sin copias)."""
-    return _CACHED_SCHEMAS
+def schemas_payload() -> tuple[dict[str, Any], ...]:
+    """Vista congelada (misma lista precomputada) para la ruta caliente: sólo lectura."""
+    return tuple(_CACHED_SCHEMAS)
 
 
 def parse_arguments(raw: Any) -> dict[str, Any]:

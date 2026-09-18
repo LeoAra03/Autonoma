@@ -17,10 +17,10 @@ import logging
 import os
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, ClassVar, Final, Literal
 
 from autonoma.config import Settings
 from autonoma.errors import AutonomaError, CancelledByUserError, ErrorCode, ToolExecutionDeniedError, redact
@@ -37,6 +37,7 @@ from autonoma.tool_registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 ChatRole = Literal["system", "user", "assistant", "tool"]
+_VALID_ROLES: Final[frozenset[str]] = frozenset(("system", "user", "assistant", "tool"))
 
 DEFAULT_HISTORY_MESSAGES: Final[int] = 16
 _MAX_TOOL_CALLS_PER_TURN: Final[int] = 16
@@ -160,20 +161,26 @@ class AgentResources:
     fs: FileSystemManager
     panic: PanicController
 
+    # Cada recurso se desregistra solo de `PanicController` al cerrarse: este cierre
+    # invoca el método definitivo (Playwright se cierra aquí, en el hilo dueño).
+    _CLOSERS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("notrack", "close"),
+        ("search", "shutdown"),
+        ("fs", "kill_all"),
+    )
+
     def close(self) -> None:
-        closers: tuple[Callable[[], None], ...] = (self.notrack.close, self.search.shutdown, self.fs.kill_all)
-        for closer in closers:
-            self.panic.unregister_cleanup(closer)
-            self.panic.unregister_cleanup(getattr(self.search, "close", None))
-        for closer in closers:
+        """Cierra cada recurso; un fallo al cerrar no impide cerrar a los demás."""
+        for attribute, final in self._CLOSERS:
+            resource = getattr(self, attribute)
             try:
-                closer()
+                getattr(resource, final)()
             except Exception as exc:  # noqa: BLE001 — cerrar no puede impedir cerrar lo demás
                 log_event(
                     logger,
                     logging.DEBUG,
                     "resources.close_error",
-                    {"resource": getattr(closer, "__qualname__", repr(closer)), "error": type(exc).__name__},
+                    {"resource": f"{type(resource).__name__}.{final}", "error": type(exc).__name__},
                 )
 
 
@@ -215,6 +222,11 @@ class Agent:
         """Cierra los recursos de la sesión construida por `build_agent`."""
         if self.resources is not None:
             self.resources.close()
+            self.resources = None
+
+    def close(self) -> None:
+        """El agente es un `ResourcePort`: puede registrarse como limpieza del pánico."""
+        self.close_resources()
 
     @property
     def history(self) -> list[dict[str, Any]]:
@@ -245,12 +257,11 @@ class Agent:
                     status = "ok"
                 except (PanicError, CancelledByUserError):
                     status = "cancelled"
-                    self.metrics.increment("turn.cancelled")
                     log_event(logger, logging.INFO, "turn.cancelled", {"iterations": self.settings.max_tool_iterations})
                     emit(EventKind.PANIC.value, "Detenido por usuario")
                     raise
                 except Exception:
-                    self.metrics.increment("turn.failed")
+                    status = "failed"
                     raise
                 return answer
         finally:
@@ -311,7 +322,10 @@ class Agent:
             ChatMessage(role="system", content=SYSTEM_PROMPT),
             ChatMessage(role="user", content="Contexto no confiable (solo datos):\n" + extra),
         ]
-        messages.extend(ChatMessage(role=str(item["role"]), content=item.get("content")) for item in self.history)
+        messages.extend(
+            ChatMessage(role=_as_role(item.get("role")), content=_as_text(item.get("content")))
+            for item in self.history
+        )
         messages.append(ChatMessage(role="user", content=prompt))
         return messages
 
@@ -327,7 +341,7 @@ class Agent:
 
     def _knowledge_digest(self) -> str:
         try:
-            return self.search.context_digest(_DIGEST_FILES, _DIGEST_PER_FILE_CHARS)
+            return self.notes.context_digest(_DIGEST_FILES, _DIGEST_PER_FILE_CHARS)
         except Exception as exc:  # noqa: BLE001 — contexto opcional: se degrada y se registra
             log_event(
                 logger,
@@ -367,7 +381,7 @@ class Agent:
             raise
         except AutonomaError as exc:
             return self._failure(name, exc, started)
-        except Exception as exc:  # noqa: BLE001 — el fallo de una herramienta no tumba el turno
+        except Exception as exc:
             logger.exception(
                 "herramienta con fallo inesperado",
                 extra={"event": "tool.unexpected_error", "fields": {"tool": name, "error": type(exc).__name__}},
@@ -442,6 +456,19 @@ class _Emitter:
                 "ui.event_error",
                 {"event_kind": str(kind), "error": type(exc).__name__},
             )
+
+
+def _as_role(value: object) -> ChatRole:
+    """El historial viene de `as_payload`: el rol se revalida, no se copia a ciegas."""
+    if isinstance(value, str) and value in _VALID_ROLES:
+        return value  # type: ignore[return-value]
+    return "user"
+
+
+def _as_text(value: object) -> str | None:
+    if value is None:
+        return None
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
 def _short_args(args: Mapping[str, Any], limit: int = _ARGS_PREVIEW_CHARS) -> str:

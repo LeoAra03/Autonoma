@@ -9,9 +9,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from autonoma.filesystem import FileSystemError, FileSystemManager  # noqa: E402
-from autonoma.key_handler import PanicController  # noqa: E402
-from autonoma.search_engine import SearchEngine  # noqa: E402
+import pytest
+
+from autonoma.filesystem import FileSystemError, FileSystemManager
+from autonoma.key_handler import PanicController
+from autonoma.search_engine import SearchEngine
 
 
 def test_protected_paths() -> None:
@@ -27,7 +29,7 @@ def test_protected_paths() -> None:
         assert not fs.is_protected("/tmp")
 
 
-def test_delete_blocked(tmp_path: Path | None = None) -> None:
+def test_delete_blocked() -> None:
     panic = PanicController()
     fs = FileSystemManager(panic)
     target = "/etc/hostname" if os.name != "nt" else r"C:\Windows\System32\drivers\etc\hosts"
@@ -55,16 +57,16 @@ def test_panic_flag() -> None:
     panic.mark_busy()
     panic.panic()
     assert panic.is_set
-    try:
+    from autonoma.key_handler import PanicError
+
+    with pytest.raises(PanicError) as excinfo:
         panic.check()
-        raise AssertionError("check debía lanzar")
-    except Exception as exc:
-        assert "Detenido" in str(exc)
+    assert "Detenido" in str(excinfo.value)
 
 
 if __name__ == "__main__":
-    from pathlib import Path as P
     import tempfile
+    from pathlib import Path as P
 
     test_protected_paths()
     test_delete_blocked()

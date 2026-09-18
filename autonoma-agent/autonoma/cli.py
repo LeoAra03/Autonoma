@@ -43,9 +43,13 @@ try:  # la dependencia es opcional por diseño: sin Rich se usa texto plano
     from rich.text import Text
     from rich.theme import Theme
 
-    RICH_AVAILABLE: Final[bool] = True
-except ImportError:  # pragma: no cover - depende del entorno
-    RICH_AVAILABLE = False
+    _RICH_IMPORT_ERROR: ImportError | None = None
+except ImportError as exc:  # pragma: no cover - depende del entorno
+    Console = Live = Markdown = Panel = Text = Theme = object  # type: ignore[assignment,misc]
+    _RICH_IMPORT_ERROR = exc
+
+# Sonda de importación: se resuelve una vez al importar el módulo y no vuelve a cambiar.
+RICH_AVAILABLE: Final[bool] = _RICH_IMPORT_ERROR is None
 
 SPINNER_FRAMES: Final[str] = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _SPINNER_INTERVAL: Final[float] = 0.08
@@ -97,7 +101,7 @@ class RichConsoleFactory:
 
     def build(self) -> ConsolePort:
         theme = Theme({"ok": "green", "warn": "yellow", "err": "bold red", "muted": "dim", "accent": "cyan"})
-        return Console(  # type: ignore[no-any-return]
+        return Console(
             theme=theme,
             highlight=False,
             markup=False,
@@ -168,7 +172,8 @@ class _ProgressReporter:
     def _spin(self) -> None:
         index = 0
         try:
-            with Live(console=self._console, refresh_per_second=12, transient=True) as live:
+            # `Live` exige una `rich.console.Console` real: el spinner sólo corre en modo rich.
+            with Live(console=self._console, refresh_per_second=12, transient=True) as live:  # type: ignore[arg-type]
                 while not self._stop.is_set():
                     frame = SPINNER_FRAMES[index % len(SPINNER_FRAMES)]
                     with self._lock:
@@ -215,13 +220,13 @@ class Session:
     def __init__(
         self,
         console: ConsolePort,
+        *,
         allow_commands: bool = False,
         global_hotkey: bool = False,
-        *,
         context: RuntimeContext | None = None,
     ) -> None:
         self.console = console
-        self.context = (context or RuntimeContext.detect()).with_allow_commands(allow_commands)
+        self.context = (context or RuntimeContext.detect()).with_allow_commands(allow=allow_commands)
         self._overrides: dict[str, str] = {}
         self.settings = self._load_settings()
         self.metrics = MetricsRegistry()
@@ -249,7 +254,7 @@ class Session:
         return load_settings(
             overrides=self._overrides,
             data_root=self.context.data_root,
-        ).with_allow_commands(self.context.allow_commands)
+        ).with_allow_commands(allow=self.context.allow_commands)
 
     def _build_agent(self) -> Agent:
         agent = build_agent(self.settings, self.panic, metrics=self.metrics, approve=self.approve)
@@ -324,7 +329,7 @@ class Session:
             f"pánico P    : {self._listener_status.state.value}",
             f"tarea       : {'en curso' if self.panic.busy else 'idle'}",
             f"trazas      : {current_trace_id() or '(sin turno activo)'}",
-            f"turnos       ok={self.metrics.counters().get('turn.completed', 0)}"
+            f"turnos       ok={self.metrics.counters().get('turn.ok', 0)}"
             f" cancelados={self.metrics.counters().get('turn.cancelled', 0)}"
             f" fallidos={self.metrics.counters().get('turn.failed', 0)}",
         ]
@@ -475,8 +480,8 @@ def repl(
 ) -> int:
     """Bucle interactivo (o un solo prompt con `once`) con limpieza garantizada."""
     _configure_stdio()
+    # `Session` aplica el flag de comandos al cargar los ajustes: una sola decisión.
     resolved = context or RuntimeContext.detect(allow_commands=allow_commands)
-    resolved = resolved.with_allow_commands(resolved.allow_commands or allow_commands)
     session = Session(build_console(resolved), allow_commands=allow_commands, global_hotkey=global_hotkey, context=resolved)
     print_banner(session.console, session.context, session.settings, session.listener_status)
     try:

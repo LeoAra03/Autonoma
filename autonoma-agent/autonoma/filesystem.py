@@ -380,6 +380,10 @@ class FileSystemManager:
     def kill_all(self) -> None:
         self._supervisor.kill_all()
 
+    def close(self) -> None:
+        """`ResourcePort`: cerrar el gestor significa dejar el árbol de procesos a cero."""
+        self._supervisor.kill_all()
+
 
 def _scan_dir(target: Path) -> list[tuple[str, bool, int | None]]:
     """`os.scandir` cachea `is_dir`/`stat` por entrada: menos syscalls que `iterdir`."""

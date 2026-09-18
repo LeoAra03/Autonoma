@@ -161,7 +161,8 @@ class NoTrackClient:
     _ensure_client = ensure_client
 
     def close(self) -> None:
-        """Cierra el cliente; tolera dobles cierres desde el hilo de pánico."""
+        """Cierra el cliente y desregistra su propia limpieza (dobles cierres: seguros)."""
+        self.panic.unregister_cleanup(self.close)
         client, self._client = self._client, None
         if client is not None and not client.is_closed:
             try:
@@ -193,14 +194,14 @@ class NoTrackClient:
 
     def _delay_before_retry(self, response: httpx.Response | None, attempt: int) -> float:
         """Respeta `Retry-After` del proveedor, con tope, y si no hay cabecera retrocede."""
-        backoff = min(self.retry_backoff * (2**attempt), _RETRY_AFTER_CAP_SECONDS)
+        backoff = float(min(self.retry_backoff * (2.0**attempt), _RETRY_AFTER_CAP_SECONDS))
         if response is None:
             return backoff
         raw = response.headers.get("retry-after", "").strip()
         if not raw:
             return backoff
         try:
-            return max(0.0, min(float(raw), _RETRY_AFTER_CAP_SECONDS))
+            return float(max(0.0, min(float(raw), _RETRY_AFTER_CAP_SECONDS)))
         except ValueError:
             return backoff
 
@@ -229,7 +230,13 @@ class NoTrackClient:
                     return consume(response)
             except httpx.HTTPError as exc:
                 self.panic.check()
-                last_error = ProviderUnavailableError(failure_message)
+                # La causa cruda se encadena (traceback en el log) pero el mensaje
+                # que ve el usuario/esquema del modelo sigue siendo el genérico.
+                last_error = ProviderUnavailableError(
+                    failure_message,
+                    context={"cause": type(exc).__name__, "attempt": attempt + 1},
+                )
+                last_error.__cause__ = exc
                 logger.warning(
                     "fallo de transporte con NoTrack",
                     extra={

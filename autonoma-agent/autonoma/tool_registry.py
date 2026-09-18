@@ -44,7 +44,7 @@ class ToolRegistry:
         self.search = search
         self.fs = fs
         # `SearchEngine` es fachada del almacén: si no se inyecta uno propio, se usa el suyo.
-        self.notes = notes if notes is not None else cast(NotesPort, search)
+        self.notes = notes if notes is not None else cast("NotesPort", search)
         self.metrics = metrics
         self._handlers: dict[str, ToolHandler] = {
             "web_search": self._research,

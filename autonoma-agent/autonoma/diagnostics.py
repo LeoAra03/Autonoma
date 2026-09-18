@@ -22,10 +22,11 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from autonoma._version import __version__
 from autonoma.config import load_settings, project_root
-from autonoma.runtime import DataRoot
 from autonoma.errors import AutonomaError
 from autonoma.presentation import safe_text
+from autonoma.runtime import DataOrigin, DataRoot
 
 __all__ = [
     "Check",
@@ -73,6 +74,7 @@ class DiagnosticReport(Mapping[str, Any]):
     python_version: str
     frozen: bool
     checks: tuple[Check, ...]
+    version: str = __version__
     network_tested: bool = False
     metrics: Mapping[str, Any] | None = None
     data_root: Mapping[str, Any] | None = None
@@ -91,6 +93,8 @@ class DiagnosticReport(Mapping[str, Any]):
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
+            "app": "autonoma",
+            "version": self.version,
             "platform": self.platform_name,
             "python": self.python_version,
             "frozen": self.frozen,
@@ -113,6 +117,21 @@ class DiagnosticReport(Mapping[str, Any]):
 
     def __len__(self) -> int:
         return len(self.as_dict())
+
+
+def _root_path(data_root: DataRoot | Path | None) -> Path:
+    """`DataRoot` o `Path` aceptados en toda la capa de diagnóstico, sin duplicar isinstance."""
+    if isinstance(data_root, DataRoot):
+        return Path(data_root.path)
+    return Path(data_root) if data_root is not None else project_root()
+
+
+def _root_payload(data_root: DataRoot | Path | None) -> dict[str, Any] | None:
+    if data_root is None:
+        return None
+    if isinstance(data_root, DataRoot):
+        return data_root.as_dict()
+    return {"path": str(data_root), "origin": DataOrigin.FLAG.value}
 
 
 def is_elevated() -> bool | None:
@@ -293,23 +312,22 @@ def collect_diagnostics(
         checks=tuple(collected),
         network_tested=False,
         metrics=metrics,
-        data_root=data_root,
+        data_root=_root_payload(data_root),
     )
 
 
 def format_report(report: DiagnosticReport) -> str:
     """Versión legible del informe (una línea por comprobación)."""
     lines = ["Autonoma — diagnóstico local (sin comprobar servicios externos)"]
-    for check in report.checks:
-        lines.append(safe_text(f"[{check.status.value.upper()}] {check.name}: {check.message}"))
+    lines.extend(safe_text(f"[{check.status.value.upper()}] {check.name}: {check.message}") for check in report.checks)
     if report.warnings:
         lines.append(f"{len(report.warnings)} advertencia(s); revisa antes de habilitar operaciones locales.")
     return "\n".join(lines)
 
 
 def run_diagnostics(
-    as_json: bool = False,
     *,
+    as_json: bool = False,
     metrics: Mapping[str, Any] | None = None,
     data_root: DataRoot | Path | None = None,
 ) -> int:
@@ -335,7 +353,7 @@ def run_diagnostics(
     return 0 if report.local_checks_passed else 1
 
 
-def run_selftest(as_json: bool = False, *, data_root: DataRoot | Path | None = None) -> int:
+def run_selftest(*, as_json: bool = False, data_root: DataRoot | Path | None = None) -> int:
     """Autoensayo del ejecutable: importaciones del bundle, raíz de datos y CLI.
 
     Pensado para el smoke test de `Autonoma.exe` en CI: verifica que el binario
@@ -346,7 +364,7 @@ def run_selftest(as_json: bool = False, *, data_root: DataRoot | Path | None = N
     checks.append(
         Check(
             "frozen_mode",
-            CheckStatus.OK if frozen else CheckStatus.OK if frozen else CheckStatus.WARNING,
+            CheckStatus.OK if frozen else CheckStatus.WARNING,
             "Ejecutando desde el bundle congelado." if frozen else "Ejecutando desde fuentes (no empaquetado).",
         )
     )
@@ -359,7 +377,7 @@ def run_selftest(as_json: bool = False, *, data_root: DataRoot | Path | None = N
         )
     )
     try:
-        root = Path(data_root.path) if isinstance(data_root, DataRoot) else (Path(data_root) if data_root is not None else project_root())
+        root = _root_path(data_root)
         writable = writable_directory(root)
     except (AutonomaError, ValueError, OSError):
         root, writable = Path.cwd(), False
@@ -392,7 +410,8 @@ def run_selftest(as_json: bool = False, *, data_root: DataRoot | Path | None = N
         checks=tuple(checks),
     )
     if as_json:
-        print(json.dumps({"mode": "selftest", **report.as_dict()}, ensure_ascii=True, indent=2))
+        payload = {"mode": "selftest", "ok": report.local_checks_passed, **report.as_dict()}
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
     else:
         print("Autonoma — autoensayo local (offline)")
         for check in report.checks:
