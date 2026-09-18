@@ -188,8 +188,21 @@ def test_interruption_while_asking_is_not_a_failure(monkeypatch: pytest.MonkeyPa
     def interrupt(prompt: str) -> str:
         raise KeyboardInterrupt
 
+    monkeypatch.setattr(bootstrap, "tty_available", lambda: True)
     monkeypatch.setattr(bootstrap.getpass, "getpass", interrupt)
     assert bootstrap.ask_secret("clave: ") == ""
+
+
+def test_without_a_terminal_nobody_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sin TTY no se lee `stdin`: una tubería heredada del lanzador bloquearía para siempre."""
+
+    def explode(prompt: str) -> str:
+        raise AssertionError("getpass no debe llegarse a invocar sin terminal")
+
+    monkeypatch.setattr(bootstrap, "tty_available", lambda: False)
+    monkeypatch.setattr(bootstrap.getpass, "getpass", explode)
+    assert bootstrap.ask_secret("clave: ") == ""
+    assert bootstrap.interactive(SimpleNamespace(no_input=False)) is False
 
 
 # --------------------------------------------------------------- comandos

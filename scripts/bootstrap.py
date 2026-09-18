@@ -279,8 +279,22 @@ def is_real_key(value: str) -> bool:
     return value.strip() not in PLACEHOLDERS
 
 
+def tty_available() -> bool:
+    """Hay terminal de verdad en ambos sentidos. Seam: las pruebas lo sustituyen a él, no a `sys`.
+
+    Sin terminal no se pregunta: `getpass` cae en leer `stdin`, y sobre una tubería heredada
+    (CI, doble clic desde un lanzador, `npm start` en Windows) eso no devuelve EOF, espera.
+    """
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (ValueError, OSError):  # flujos cerrados o redirigidos de forma extraña
+        return False
+
+
 def ask_secret(prompt: str) -> str:
     """Lectura oculta de una clave; vacío o interrupción significan "más tarde", nunca un fallo."""
+    if not tty_available():
+        return ""
     try:
         return (getpass.getpass(prompt) or "").strip()
     except (EOFError, KeyboardInterrupt):
@@ -319,7 +333,7 @@ def ensure_env_file(*, dry_run: bool, interactive: bool) -> bool:
 
 def interactive(opts: argparse.Namespace) -> bool:
     """Sólo se pregunta si nadie dijo `--no-input` y hay una terminal de verdad."""
-    return bool(not opts.no_input and sys.stdin.isatty() and sys.stdout.isatty())
+    return bool(not opts.no_input and tty_available())
 
 
 def resolved_venv(explicit: str | None) -> Path:
@@ -428,7 +442,7 @@ def run_key(venv: Path, opts: argparse.Namespace) -> int:
     setup(venv, dry_run=opts.dry_run, interactive=False)
     value = (opts.args[0].strip() if opts.args else "").strip()
     if not value:
-        if opts.no_input or not sys.stdin.isatty():
+        if opts.no_input or not tty_available():
             raise BootstrapError("pasa la clave como argumento o ejecútalo en una terminal")
         value = ask_secret("NOTRACK_API_KEY: ")
     if not value:
