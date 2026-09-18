@@ -378,8 +378,13 @@ def print_status(venv: Path) -> int:
     return 0 if installed else 1
 
 
-def setup(venv: Path, *, dry_run: bool, interactive: bool) -> None:
-    """`setup` idempotente: lo que ya está, se salta en milisegundos."""
+def setup(venv: Path, *, dry_run: bool, interactive: bool, ensure_env: bool = True) -> None:
+    """`setup` idempotente: lo que ya está, se salta en milisegundos.
+
+    `ensure_env` sólo tiene sentido cuando lo que sigue es *usar* el agente. Las tareas de
+    desarrollo (`test`, `lint`, `bench`, `build`) no necesitan clave y no deben quejarse de
+    que falte: avisan una vez, en el camino que sí la usa.
+    """
     if not PACKAGE.is_dir():
         raise BootstrapError(f"no encuentro el paquete en {PACKAGE}; ejecuta esto desde el repo de Autonoma")
     python, version = find_python(os.environ.get("AUTONOMA_PYTHON"))
@@ -391,7 +396,8 @@ def setup(venv: Path, *, dry_run: bool, interactive: bool) -> None:
             write_stamp(venv, fingerprint=contract_fingerprint(), python=version)
     else:
         say("2/2", "entorno y paquete ya instalados")
-    ensure_env_file(dry_run=dry_run, interactive=interactive)
+    if ensure_env:
+        ensure_env_file(dry_run=dry_run, interactive=interactive)
 
 
 def launch(command: Sequence[str], *, cwd: Path | None = None) -> int:
@@ -439,7 +445,7 @@ def run_key(venv: Path, opts: argparse.Namespace) -> int:
 
 def run_in_venv(venv: Path, opts: argparse.Namespace, name: str, *, needs_package: bool = True) -> int:
     """Corre una tarea dentro del venv, asegurando antes lo que esa tarea exige."""
-    setup(venv, dry_run=opts.dry_run, interactive=False)
+    setup(venv, dry_run=opts.dry_run, interactive=False, ensure_env=False)
     if needs_package:
         ensure_dev_tools(venv, dry_run=opts.dry_run)
     if not venv_python(venv).is_file() and not opts.dry_run:
@@ -486,8 +492,12 @@ COMMANDS: Mapping[str, tuple[object, bool]] = {
 
 
 def run_cli_direct(venv: Path, opts: argparse.Namespace, cli_args: Sequence[str]) -> int:
-    """`doctor`/`selftest` no necesitan las herramientas de desarrollo, sólo el paquete."""
-    setup(venv, dry_run=opts.dry_run, interactive=False)
+    """`doctor`/`selftest` no necesitan las herramientas de desarrollo, sólo el paquete.
+
+    Tampoco reclaman la clave: son justamente los comandos que se usan para averiguar
+    qué falta, y en CI corren sin credenciales por diseño.
+    """
+    setup(venv, dry_run=opts.dry_run, interactive=False, ensure_env=False)
     command = agent_command(venv, list(cli_args))
     if opts.dry_run:
         print("    (dry-run) " + " ".join(shlex.quote(part) for part in command), flush=True)

@@ -231,6 +231,38 @@ def test_run_setup_skips_the_venv_when_it_already_exists(monkeypatch: pytest.Mon
     assert not any("venv" in " ".join(cmd) and "-m" in cmd for cmd in calls)  # no recrea el entorno
 
 
+def test_dev_commands_do_not_nag_about_the_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`bootstrap test` no tiene por qué quejarse de una clave que no usa."""
+    seen: dict[str, object] = {}
+
+    def fake_setup(venv: Path, *, dry_run: bool, interactive: bool, ensure_env: bool = True) -> None:
+        seen["ensure_env"] = ensure_env
+
+    monkeypatch.setattr(bootstrap, "setup", fake_setup)
+    monkeypatch.setattr(bootstrap, "ensure_dev_tools", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap, "venv_python", lambda venv, **k: Path(sys.executable))
+    monkeypatch.setattr(bootstrap, "dev_command", lambda venv, name, args: [sys.executable, "-c", "pass"])
+    bootstrap.run_in_venv(Path("/tmp/x"), opts("test"), "test")
+    assert seen["ensure_env"] is False
+    assert "NOTRACK_API_KEY" not in capsys.readouterr().out
+
+
+def test_the_run_path_prepares_the_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run` sí garantiza el `.env` (con `--no-input`: avisar, no preguntar)."""
+    seen: dict[str, object] = {}
+
+    def fake_setup(venv: Path, *, dry_run: bool, interactive: bool, ensure_env: bool = True) -> None:
+        seen.update(dry_run=dry_run, interactive=interactive, ensure_env=ensure_env)
+
+    monkeypatch.setattr(bootstrap, "setup", fake_setup)
+    monkeypatch.setattr(bootstrap, "agent_command", lambda venv, args: [sys.executable, "-c", "pass", *args])
+    monkeypatch.setattr(bootstrap.subprocess, "call", lambda *a, **k: 0)
+    bootstrap.run_run(Path("/tmp/x"), opts("run", "--plain", "hola", dry_run=False))
+    assert seen == {"dry_run": False, "interactive": False, "ensure_env": True}
+
+
 def test_install_failure_explains_the_offline_escape_hatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def failing(argv, **kwargs):
         return subprocess.CompletedProcess(list(argv), 1, "", "error: no se pudo contactar con PyPI")
