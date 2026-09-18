@@ -50,7 +50,8 @@ def test_documented_npm_commands_all_exist() -> None:
 def test_launchers_exist_and_are_executable_where_it_matters(script: str) -> None:
     path = REPO_ROOT / script
     assert path.is_file()
-    if path.suffix == ".py":
+    if path.suffix == ".py" and os.name != "nt":
+        # En NTFS no hay bit de ejecución: allí el lanzador válido es el `.bat`/`node`.
         assert path.stat().st_mode & 0o111, f"{script} debería poder ejecutarse directo"
 
 
@@ -72,6 +73,7 @@ def test_node_wrapper_is_syntactically_valid() -> None:
         text=True,
         check=False,
         timeout=60,
+        stdin=subprocess.DEVNULL,  # nunca heredar la consola del runner: bloquea en Windows
     )
     assert done.returncode == 0, done.stderr[-400:]
 
@@ -105,6 +107,7 @@ def test_posix_launcher_is_parseable() -> None:
         text=True,
         check=False,
         timeout=60,
+        stdin=subprocess.DEVNULL,  # nunca heredar la consola del runner: bloquea en Windows
     )
     assert done.returncode == 0, done.stderr[-300:]
 
