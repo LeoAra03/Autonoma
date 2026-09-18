@@ -47,6 +47,15 @@ def test_listener_status_describe_is_actionable() -> None:
     assert ListenerStatus(ListenerState.DISABLED).describe().startswith("Listener P: inactivo")
 
 
+def test_describe_never_leaves_double_periods_or_trailing_noise() -> None:
+    """El texto se imprime tal cual: una razón que ya termina en punto no duplica el punto."""
+    for reason in ("Desactivado por defecto; --global-hotkey para habilitar.", "sin permiso", "", "   ", None):
+        line = ListenerStatus(ListenerState.UNAVAILABLE, reason).describe()  # type: ignore[arg-type]
+        assert ".." not in line
+        assert line.startswith("Listener P: inactivo")
+        assert not line.endswith("  ")
+
+
 def test_disabled_handler_never_touches_pynput() -> None:
     panic = PanicController()
     handler = KeyHandler(panic, enabled=False)

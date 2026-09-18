@@ -62,6 +62,10 @@ try {
         Write-Host "   OK: $version · python $($selftest.python) · $($selftest.checks.Count) checks"
     }
 
+    Write-Host "-- ZIP portable (copiar y usar)"
+    & $py (Join-Path $repo "scripts\make_bundle.py") --platform windows --dist-dir (Join-Path $agent "dist")
+    if ($LASTEXITCODE -ne 0) { Write-Warning "no se pudo armar el ZIP portable (el .exe sigue siendo válido)" }
+
     $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
     "$hash  Autonoma.exe" | Set-Content -NoNewline (Join-Path (Get-Location) "dist\Autonoma.exe.sha256")
     $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)

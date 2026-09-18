@@ -94,6 +94,20 @@ Comprobado en Linux/Python 3.11.2 (estado de la versión 2.0.0):
   5 corridas; falla si una métrica empeora más de 1,35×).
 - El diagnóstico distingue explícitamente configuración local de disponibilidad del proveedor.
 
+## Reparto en un PC sin entorno de desarrollo
+
+Tres opciones de menor a más compromiso (detalle en [INSTALL.md](INSTALL.md)):
+
+1. `Autonoma-Portable-windows-<versión>.zip`: descomprimir, renombrar `.env.example` a `.env`,
+   pegar la clave y doble clic en `Autonoma.exe`. Se arma con `scripts/make_bundle.py`
+   (y desde `build_windows.ps1`), con su `.sha256`.
+2. `npm start` (Node instalado): el instalador de `scripts/bootstrap.py` monta el `.venv` y
+   arranca; segunda pasada en menos de un segundo.
+3. `Run-Autonoma.bat`: lo mismo sin Node, sólo con Python en el PATH.
+
+Al hacer doble clic, el `.exe` espera un Enter antes de cerrar la ventana para que un error
+quede legible (`AUTONOMA_NO_PAUSE=1` lo desactiva en automatizaciones).
+
 ## Autoensayo del ejecutable portable
 
 El bundle debe demostrarse a sí mismo sin credenciales ni red:

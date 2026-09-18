@@ -59,10 +59,13 @@ class ListenerStatus:
         return self.state is ListenerState.RUNNING
 
     def describe(self) -> str:
+        """Una línea para la consola: estado, por qué si no arrancó, y el plan B (Ctrl+C)."""
         if self.running:
             return "Listener P: activo"
-        suffix = f" — {self.reason}" if self.reason else ""
-        return f"Listener P: inactivo{suffix}. Usa Ctrl+C en la terminal."
+        reason = (self.reason or "").strip().rstrip(".")
+        if not reason:
+            return "Listener P: inactivo. Usa Ctrl+C en la terminal."
+        return f"Listener P: inactivo — {reason}."""
 
 
 Cleanups = Callable[[], None]

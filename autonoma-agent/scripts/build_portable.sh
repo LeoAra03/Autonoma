@@ -24,6 +24,13 @@ for arg in "$@"; do
   esac
 done
 
+bundle() {
+  # ZIP "copiar y usar": binario + plantilla de .env + LEEME generado (scripts/make_bundle.py).
+  local bundle_script="$ROOT/../scripts/make_bundle.py"
+  [[ -f "$bundle_script" ]] || { echo "aviso: sin $bundle_script; no se arma el ZIP portable" >&2; return 0; }
+  "$PY" "$bundle_script" --platform linux --dist-dir "$ROOT/dist" || echo "aviso: no se pudo armar el ZIP portable" >&2
+}
+
 build_zipapp() {
   echo "-- construyendo zipapp portable (dist/autonoma.pyz)"
   rm -rf build/pyz
@@ -75,8 +82,10 @@ if "$PY" -m PyInstaller --noconfirm --clean autonoma.spec 2> build/pyinstaller.e
     AUTONOMA_HOME="$(mktemp -d)" "$BIN" --doctor --json | "$PY" -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["local_checks_passed"] and not d["network_tested"] else 1)'
   fi
   echo "-- listo: $BIN ($(du -h "$BIN" | cut -f1)) · hash en $BIN.sha256"
+  bundle
   exit 0
 fi
 
 echo "   PyInstaller no pudo compilar ($(grep -m1 -o 'libpython[^ ]*' build/pyinstaller.err || echo 'ver build/pyinstaller.err'))"
 build_zipapp
+bundle

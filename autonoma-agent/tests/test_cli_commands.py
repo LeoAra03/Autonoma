@@ -14,6 +14,7 @@ from autonoma import __version__
 from autonoma.cli import (
     _COMMAND_TABLE,
     HELP_TEXT,
+    NO_PAUSE_ENV,
     PlainConsole,
     Session,
     _configure_stdio,
@@ -23,9 +24,11 @@ from autonoma.cli import (
     build_context,
     build_parser,
     main,
+    maybe_pause_on_exit,
     parse_args,
     print_banner,
     repl,
+    should_pause_on_exit,
 )
 from autonoma.config import Settings
 from autonoma.errors import ConfigurationError, ExitCode
@@ -469,6 +472,52 @@ def test_main_module_entrypoint_is_callable() -> None:
     finally:
         cli_module.main = original  # type: ignore[assignment]
     assert called == [[]]
+
+
+@pytest.mark.parametrize(
+    ("frozen", "has_prompt", "interactive", "diagnostic", "disabled", "expected"),
+    [
+        (True, False, True, False, False, True),  # doble clic en el .exe: hay que dejar la ventana
+        (True, True, True, False, False, False),  # lanzado con prompt:modo script, sin pausa
+        (True, False, False, False, False, False),  # sin TTY (CI, tubería): nunca bloquear
+        (True, False, True, True, False, False),  # --doctor/--selftest los consume un script
+        (True, False, True, False, True, False),  # AUTONOMA_NO_PAUSE=1 (el .bat ya pausa)
+        (False, False, True, False, False, False),  # `python -m autonoma`: la consola ya es del usuario
+    ],
+)
+def test_pause_decision_table(
+    frozen: bool, has_prompt: bool, interactive: bool, diagnostic: bool, disabled: bool, expected: bool
+) -> None:
+    assert should_pause_on_exit(
+        frozen=frozen, has_prompt=has_prompt, interactive=interactive, diagnostic=diagnostic, disabled=disabled
+    ) is expected
+
+
+def test_maybe_pause_waits_only_for_the_double_clicked_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads: list[str] = []
+    monkeypatch.setattr("autonoma.cli.sys.frozen", True, raising=False)
+    monkeypatch.setattr("autonoma.cli._tty_available", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": reads.append(prompt) or "")
+    args = SimpleNamespace(prompt=[], doctor=False, selftest=False)
+
+    maybe_pause_on_exit(args, env={})
+    assert reads and "Enter" in reads[0]
+
+    reads.clear()
+    maybe_pause_on_exit(args, env={NO_PAUSE_ENV: "1"})
+    assert reads == []
+
+
+def test_maybe_pause_survives_a_closed_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Si no hay de dónde leer (stdin cerrado), cerrar no puede convertirse en un traceback."""
+
+    def boom(prompt: str = "") -> str:
+        raise OSError("consola destruida")
+
+    monkeypatch.setattr("autonoma.cli.sys.frozen", True, raising=False)
+    monkeypatch.setattr("autonoma.cli._tty_available", lambda: True)
+    monkeypatch.setattr("builtins.input", boom)
+    maybe_pause_on_exit(SimpleNamespace(prompt=[], doctor=False, selftest=False), env={})
 
 
 def test_plain_console_forwards_text_and_swallows_style_kwargs() -> None:

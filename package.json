@@ -1,0 +1,31 @@
+{
+  "name": "autonoma",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Instalador y lanzador de un solo comando para Autonoma (agente local de terminal).",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node scripts/bootstrap.mjs",
+    "setup": "node scripts/bootstrap.mjs setup",
+    "key": "node scripts/bootstrap.mjs key",
+    "status": "node scripts/bootstrap.mjs status",
+    "doctor": "node scripts/bootstrap.mjs doctor",
+    "selftest": "node scripts/bootstrap.mjs selftest",
+    "test": "node scripts/bootstrap.mjs test",
+    "lint": "node scripts/bootstrap.mjs lint",
+    "typecheck": "node scripts/bootstrap.mjs types",
+    "bench": "node scripts/bootstrap.mjs bench",
+    "build": "node scripts/bootstrap.mjs build",
+    "clean": "node scripts/bootstrap.mjs clean"
+  },
+  "keywords": [
+    "agente",
+    "terminal",
+    "offline-first",
+    "sin-instalacion"
+  ]
+}

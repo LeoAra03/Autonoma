@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import threading
 from collections.abc import Callable, Mapping
@@ -562,6 +563,44 @@ def build_context(args: argparse.Namespace) -> RuntimeContext:
     )
 
 
+NO_PAUSE_ENV = "AUTONOMA_NO_PAUSE"
+
+
+def should_pause_on_exit(*, frozen: bool, has_prompt: bool, interactive: bool, diagnostic: bool, disabled: bool) -> bool:
+    """Si hay que esperar un Enter antes de cerrar la ventana.
+
+    Doble clic sobre `Autonoma.exe` abre una consola que desaparece con el proceso: un
+    error quedaría ilegible. Sólo aplica al binario congelado, en modo interactivo, sin
+    prompt en la línea de órdenes y fuera de los modos de diagnóstico (que usan scripts).
+    """
+    return bool(frozen and interactive and not has_prompt and not diagnostic and not disabled)
+
+
+def _tty_available() -> bool:
+    """Seam de terminal: las pruebas lo sustituyen en lugar de retocar el módulo `sys`."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (ValueError, OSError):  # flujos cerrados (pythonw, consola destruida)
+        return False
+
+
+def maybe_pause_on_exit(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> None:
+    """Espera un Enter si quien abre el .exe lo hizo haciendo doble clic (nunca falla)."""
+    pause = should_pause_on_exit(
+        frozen=bool(getattr(sys, "frozen", False)),
+        has_prompt=bool(getattr(args, "prompt", None)),
+        interactive=_tty_available(),
+        diagnostic=bool(getattr(args, "doctor", False) or getattr(args, "selftest", False)),
+        disabled=bool(((os.environ if env is None else env).get(NO_PAUSE_ENV) or "").strip()),
+    )
+    if not pause:
+        return
+    try:
+        input("\nPulsa Enter para cerrar esta ventana.\n")
+    except (EOFError, KeyboardInterrupt, OSError):
+        return
+
+
 def main(argv: list[str] | None = None) -> None:
     """Punto de entrada del paquete y del ejecutable congelado."""
     args = parse_args(argv)
@@ -582,6 +621,7 @@ def main(argv: list[str] | None = None) -> None:
         detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
         print(f"No se pudo iniciar Autonoma: {safe_text(detail)}", file=sys.stderr)
         code = int(exc.exit_code) if isinstance(exc, AutonomaError) else int(ExitCode.CONFIGURATION)
+    maybe_pause_on_exit(args)
     raise SystemExit(code)
 
 

@@ -5,7 +5,13 @@ No es una aplicación web. El perfil prioritario es [Windows con acceso al host]
 
 ## Instalación
 
-Desde este directorio:
+**La vía corta** (no requiere leer nada): desde la raíz del repo, `npm start` —o doble clic en
+`Run-Autonoma.bat` / `./run-autonoma.sh`— crea el entorno, instala el paquete, te pide la clave la
+primera vez y abre el agente. El ejecutable portable (`Autonoma.exe`, sin Python en el destino) se
+arma con `npm run build` o `scripts/build_windows.ps1`. Todo eso está detallado en
+[../INSTALL.md](../INSTALL.md).
+
+Desde este directorio, a mano:
 
 ```bash
 python -m venv .venv
