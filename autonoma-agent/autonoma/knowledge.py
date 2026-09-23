@@ -121,12 +121,7 @@ class KnowledgeStore:
         self.panic.check()
         self._ensure_dir()
         path = self.knowledge_dir / f"{_now_stamp()}_{_slug(title)}.md"
-        text = (
-            f"# {title}\n\n"
-            f"- fecha: {datetime.now(timezone.utc).isoformat()}\n"
-            f"- fuente: {source}\n\n"
-            f"{body.strip()}\n"
-        )
+        text = f"# {title}\n\n- fecha: {datetime.now(timezone.utc).isoformat()}\n- fuente: {source}\n\n{body.strip()}\n"
         self._write_exclusive(path, text)
         return path
 

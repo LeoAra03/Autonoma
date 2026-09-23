@@ -35,3 +35,13 @@ construye con los scripts de `autonoma-agent/scripts/` y se autoverifica con `--
 sus artefactos salen de CI en la job `windows-executable`.
 
 La aplicación necesita una clave propia de NoTrack para conversaciones reales; las pruebas no usan APIs.
+Si prefieres que nada salga de tu máquina, apunta el agente a un modelo local (`NOTRACK_BASE_URL=http://127.0.0.1:11434/v1`)
+y la clave deja de ser obligatoria.
+
+## Qué puede hacer hoy
+
+Investigar en la web y leer páginas largas por partes, recorrer y **editar** archivos sin reescribirlos enteros,
+buscar en disco, dejar notas en `knowledge_base/`, lanzar procesos que siguen vivos en segundo plano y consultar su
+salida, y recordar la conversación entre ejecuciones (`--resume`, `/sessions`). Los límites son configurables sin
+dejar de ser límites: la aprobación humana (`SI`) sigue siendo obligatoria para cualquier escritura o comando, y no
+hay sandbox simulado. Detalle en [`autonoma-agent/README.md`](autonoma-agent/README.md).

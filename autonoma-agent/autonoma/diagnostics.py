@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from autonoma._version import __version__
 from autonoma.config import load_settings, project_root
 from autonoma.errors import AutonomaError
+from autonoma.notrack_client import is_loopback_host
 from autonoma.presentation import safe_text
 from autonoma.runtime import DataOrigin, DataRoot
 
@@ -185,8 +186,13 @@ CheckFn = Callable[[], Sequence[Check]]
 def _privileges_check() -> Sequence[Check]:
     elevated = is_elevated()
     if elevated:
-        return [Check("privileges", CheckStatus.WARNING,
-                      "Elevado: los comandos tendrían permisos de administrador; usa una terminal normal.")]
+        return [
+            Check(
+                "privileges",
+                CheckStatus.WARNING,
+                "Elevado: los comandos tendrían permisos de administrador; usa una terminal normal.",
+            )
+        ]
     if elevated is None:
         return [Check("privileges", CheckStatus.WARNING, "No se pudo determinar elevación.")]
     return [Check("privileges", CheckStatus.OK, "Sin elevación detectada.")]
@@ -225,10 +231,16 @@ def _configuration_checks(data_root: DataRoot | Path | None = None) -> Sequence[
             )
         ]
     checks: list[Check] = [Check("configuration", CheckStatus.OK, "Configuración válida.")]
+    memory_paths: list[tuple[str, Path]] = [("log_directory", settings.log_path())]
+    if settings.session_persist:
+        # Sólo se exige que sea escribible si de verdad se va a escribir: con la memoria
+        # apagada un `sessions/` bloqueado no es un problema del usuario.
+        memory_paths.insert(0, ("sessions_directory", settings.sessions_path()))
+    memory_paths.append(("jobs_directory", settings.jobs_path()))
     for name, path in (
         ("data_directory", settings.root_dir or project_root()),
         ("knowledge_directory", settings.knowledge_path()),
-        ("log_directory", settings.log_path()),
+        *memory_paths,
     ):
         writable = writable_directory(path)
         checks.append(
@@ -238,15 +250,43 @@ def _configuration_checks(data_root: DataRoot | Path | None = None) -> Sequence[
                 f"{safe_text(str(path))}: " + ("escritura comprobada." if writable else "sin escritura."),
             )
         )
-    checks.append(
-        Check(
-            "notrack_key",
-            CheckStatus.OK if settings.has_notrack_key else CheckStatus.WARNING,
+    if settings.can_talk_to_model:
+        key_detail = (
             "Configurada; validez no comprobada."
             if settings.has_notrack_key
-            else "Falta clave; configura /key antes de conversar.",
+            else "Sin clave: endpoint local en loopback, se confía en lo que corre en esta máquina."
+        )
+        key_status = CheckStatus.OK
+    else:
+        key_detail = "Falta clave; configura /key antes de conversar."
+        key_status = CheckStatus.WARNING
+    checks.append(Check("notrack_key", key_status, key_detail))
+    checks.append(
+        Check(
+            "memory",
+            CheckStatus.OK if settings.session_persist else CheckStatus.WARNING,
+            "Historial en disco activo; --resume lo recupera."
+            if settings.session_persist
+            else "Historial en disco apagado: nada sobrevive a cerrar el proceso.",
         )
     )
+    checks.append(
+        Check(
+            "limits",
+            CheckStatus.OK,
+            f"{settings.max_tool_iterations} iteraciones por turno, "
+            f"{settings.max_tool_calls_per_turn} llamadas por vuelta "
+            f"({settings.max_parallel_tool_calls} en paralelo), lecturas de {settings.read_limit_chars} caracteres.",
+        )
+    )
+    if settings.allow_private_network:
+        checks.append(
+            Check(
+                "network_policy",
+                CheckStatus.WARNING,
+                "allow_private_network activo: fetch_url y la investigación pueden tocar la red local.",
+            )
+        )
     checks.append(_endpoint_check(settings.notrack_base_url))
     checks.append(_hotkey_check())
     checks.append(_dependencies_check())
@@ -254,19 +294,23 @@ def _configuration_checks(data_root: DataRoot | Path | None = None) -> Sequence[
 
 
 def _endpoint_check(base_url: str) -> Check:
+    """El endpoint tiene que ser HTTPS, salvo que apunte a esta misma máquina.
+
+    `http://127.0.0.1:11434` es la firma de un modelo local (Ollama, LM Studio): marcarlo
+    como error obligaría al usuario a abrir túneles para algo que nunca sale del equipo.
+    La regla es la misma que `validate_base_url`, no una segunda opinión.
+    """
     parsed = urlsplit(base_url)
-    https_ok = (
-        parsed.scheme == "https"
-        and bool(parsed.hostname)
-        and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
-    )
-    return Check(
-        "notrack_url",
-        CheckStatus.OK if https_ok else CheckStatus.ERROR,
-        "HTTPS configurado; conectividad no comprobada."
-        if https_ok
-        else "URL incompatible con la política HTTPS.",
-    )
+    clean = bool(parsed.hostname) and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+    https_ok = parsed.scheme == "https" and clean
+    local_ok = parsed.scheme == "http" and clean and is_loopback_host(str(parsed.hostname))
+    if https_ok:
+        message = "HTTPS configurado; conectividad no comprobada."
+    elif local_ok:
+        message = "Endpoint local en loopback: sin HTTPS por diseño; la política sigue cerrada para el resto."
+    else:
+        message = "URL incompatible con la política HTTPS."
+    return Check("notrack_url", CheckStatus.OK if https_ok or local_ok else CheckStatus.ERROR, message)
 
 
 def _hotkey_check() -> Check:
@@ -283,7 +327,9 @@ def _hotkey_check() -> Check:
 def _dependencies_check() -> Check:
     missing = [name for name in _REQUIRED_MODULES if not _module_available(name)]
     if not missing:
-        return Check("dependencies", CheckStatus.OK, "Dependencias base presentes: " + ", ".join(_REQUIRED_MODULES) + ".")
+        return Check(
+            "dependencies", CheckStatus.OK, "Dependencias base presentes: " + ", ".join(_REQUIRED_MODULES) + "."
+        )
     return Check(
         "dependencies",
         CheckStatus.ERROR if "httpx" in missing else CheckStatus.WARNING,
@@ -355,9 +401,7 @@ def run_diagnostics(
             platform_name=platform.system(),
             python_version=platform.python_version(),
             frozen=bool(getattr(sys, "frozen", False)),
-            checks=(
-                Check("diagnostic", CheckStatus.ERROR, "No se pudo completar el diagnóstico local."),
-            ),
+            checks=(Check("diagnostic", CheckStatus.ERROR, "No se pudo completar el diagnóstico local."),),
         )
         report = fallback
     if as_json:
@@ -408,7 +452,9 @@ def run_selftest(*, as_json: bool = False, data_root: DataRoot | Path | None = N
         parsed = parse_args(["--doctor"])
         entry_ok = bool(getattr(parsed, "doctor", False))
     except (SystemExit, ValueError, ImportError) as exc:
-        checks.append(Check("cli_entry", CheckStatus.ERROR, f"No se pudo interpretar la línea de órdenes: {type(exc).__name__}"))
+        checks.append(
+            Check("cli_entry", CheckStatus.ERROR, f"No se pudo interpretar la línea de órdenes: {type(exc).__name__}")
+        )
     else:
         checks.append(
             Check(

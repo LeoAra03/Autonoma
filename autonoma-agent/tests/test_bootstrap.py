@@ -402,3 +402,107 @@ def test_status_is_json_ready_and_exit_code_says_if_instalar(
     # La ruta se compara tras parsear el JSON: en Windows el JSON escapa las barras
     # invertidas y buscar `str(tmp_path)` como subcadena sería un falso negativo.
     assert json.loads(out)["venv"] == str(tmp_path)
+
+
+# ───────────────────────────────────────────────────────────────────── `update`
+class FakeGit:
+    """`_run` de repuesto: responde a las órdenes de git que `update` consulta, sin red ni repos."""
+
+    def __init__(
+        self,
+        *,
+        dirty: str = "",
+        behind: str = "0",
+        upstream: str = "",
+        inside: str = "true",
+        verify_ok: bool = True,
+    ) -> None:
+        self.calls: list[list[str]] = []
+        self.answers = {
+            "--is-inside-work-tree": (0, inside),
+            "--abbrev-ref HEAD": (0, "main"),
+            "--abbrev-ref @{u}": (0 if upstream else 1, upstream),
+            "--verify --quiet": (0 if verify_ok else 1, "sha-de-origin" if verify_ok else ""),
+            "status --porcelain": (0, dirty),
+            "fetch": (0, ""),
+            "rev-list --count": (0, behind),
+            "--short HEAD": (0, "abc1234"),
+            "rev-parse HEAD": (0, "abc1234567890"),
+            "merge": (0, ""),
+            "log --oneline": (0, "def5678 trae el cambio\n"),
+        }
+
+    def __call__(self, argv, *, dry_run=False, capture=False, timeout=900.0, env=None):
+        argv = [str(part) for part in argv]
+        self.calls.append(argv)
+        joined = " ".join(argv)
+        for needle, (code, out) in self.answers.items():
+            if needle in joined:
+                return subprocess.CompletedProcess(argv, code, out + ("\n" if out else ""), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def ran(self, needle: str) -> bool:
+        return any(needle in " ".join(call) for call in self.calls)
+
+
+def _update_opts(**flags: object) -> SimpleNamespace:
+    return SimpleNamespace(dry_run=False, args=list(flags.get("args", [])))
+
+
+def test_update_refuses_a_dirty_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    git = FakeGit(dirty=" M autonoma/agent.py", behind="2")
+    monkeypatch.setattr(bootstrap, "_run", git)
+    with pytest.raises(BootstrapError, match="cambios locales"):
+        bootstrap.run_update(Path("/tmp/.venv"), _update_opts())
+    assert not git.ran("merge")
+
+
+def test_update_merges_and_resyncares_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    git = FakeGit(behind="2")
+    setups: list[bool] = []
+    monkeypatch.setattr(bootstrap, "_run", git)
+    monkeypatch.setattr(bootstrap, "setup", lambda venv, **kwargs: setups.append(bool(kwargs["dry_run"])))
+    assert bootstrap.run_update(Path("/tmp/.venv"), _update_opts()) == 0
+    assert git.ran("fetch") and git.ran("merge --ff-only")
+    assert setups == [False]  # el entorno se re-instala con el código nuevo
+
+
+def test_update_says_so_when_there_is_nothing_to_do(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(bootstrap, "_run", FakeGit(behind="0"))
+    monkeypatch.setattr(bootstrap, "setup", lambda *a, **k: pytest.fail("no debe reinstalar nada"))
+    assert bootstrap.run_update(Path("/tmp/.venv"), _update_opts()) == 0
+    assert "ya estás al día" in capsys.readouterr().out
+
+
+def test_update_falls_back_to_the_branch_on_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rama sin upstream: si `origin/<rama>` existe, se puede actualizar igual."""
+    git = FakeGit(behind="1", upstream="", verify_ok=True)
+    monkeypatch.setattr(bootstrap, "_run", git)
+    monkeypatch.setattr(bootstrap, "setup", lambda *a, **k: None)
+    assert bootstrap.run_update(Path("/tmp/.venv"), _update_opts()) == 0
+    assert any("origin/main" in " ".join(call) for call in git.calls)
+
+
+def test_update_without_upstream_or_origin_explains_the_bundle(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setattr(bootstrap, "_run", FakeGit(behind="1", upstream="", verify_ok=False))
+    monkeypatch.setattr(bootstrap, "setup", lambda *a, **k: pytest.fail("no debe reinstalar nada"))
+    assert bootstrap.run_update(Path("/tmp/.venv"), _update_opts()) == 0
+    printed = capsys.readouterr().out
+    assert "no tiene remoto" in printed
+
+
+def test_update_on_a_portable_install_points_to_the_release(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """Sin `git` no hay merge posible: se dice qué bajar, y no se toca nada."""
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    with pytest.raises(BootstrapError, match="necesita git"):
+        bootstrap._git_argv()
+    assert bootstrap._announce_portable_update() == 0
+    printed = capsys.readouterr().out
+    assert "releases/latest" in printed and "--selftest" in printed
+
+
+def test_update_is_a_documented_command() -> None:
+    assert "update" in bootstrap.COMMANDS
+    assert bootstrap.COMMANDS["update"][0] is bootstrap.run_update

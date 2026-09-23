@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from getpass import getpass
 from typing import Any, Final
 
@@ -33,6 +33,7 @@ from autonoma.observability import MetricsRegistry, configure_logging, current_t
 from autonoma.ports import ConsolePort, EventKind
 from autonoma.presentation import approval_heading, operation_preview, safe_text
 from autonoma.runtime import RenderPreferences, RuntimeContext
+from autonoma.sessions import SessionStore
 
 __all__ = ["HELP_TEXT", "Session", "build_console", "main", "parse_args", "repl"]
 
@@ -67,6 +68,10 @@ Comandos
   /status            claves, knowledge_base, pánico y métricas
   /kb                listar notas de knowledge_base
   /clear             borrar historial de conversación
+  /sessions          sesiones guardadas (para --resume)
+  /resume [id]       retomar el historial de una sesión
+  /attach <ruta>     meter un archivo en el contexto de esta sesión
+  /forget            borrar el historial visible Y la sesión en disco
   /panic             activar cancelación entre tareas
 
 Pánico
@@ -218,6 +223,11 @@ class _ProgressReporter:
 class Session:
     """Sesión de trabajo: contexto, recursos, aprobación y ciclo de vida."""
 
+    # Defaults de clase: una sesión construida a mano (sin el `__init__` completo) sigue
+    # teniendo capa de memoria vacía en vez de `AttributeError` a mitad de turno.
+    _attachments: Sequence[str] = ()
+    _startup_notice: tuple[str, str] | None = None
+
     def __init__(
         self,
         console: ConsolePort,
@@ -225,12 +235,22 @@ class Session:
         allow_commands: bool = False,
         global_hotkey: bool = False,
         context: RuntimeContext | None = None,
+        resume: str | None = None,
+        attach: Sequence[str] = (),
+        overrides: Mapping[str, str] | None = None,
     ) -> None:
         self.console = console
         self.context = (context or RuntimeContext.detect()).with_allow_commands(allow=allow_commands)
-        self._overrides: dict[str, str] = {}
+        self._overrides: dict[str, str] = dict(overrides or {})
         self.settings = self._load_settings()
         self.metrics = MetricsRegistry()
+        # La sesión vive fuera del agente: `/key` reconstruye recursos, y el historial
+        # (con su id en disco) debe sobrevivir a esa recarga.
+        self.sessions = SessionStore(self.settings.sessions_path(), enabled=self.settings.session_persist)
+        self.session_id = self._select_session(resume)
+        self._attachments: list[str] = []
+        self._pending_attach = tuple(attach)
+        self._resume_requested = resume
         self._logging = configure_logging(
             log_dir=self.settings.log_path(),
             level=logging.INFO,
@@ -244,6 +264,7 @@ class Session:
             self._listener_status = self.handler.start()
             self.settings = self._ensure_notrack_key(self.settings)
             self.agent = self._build_agent()
+            self._after_agent_built()
         except BaseException:
             self.panic.panic()
             self.handler.stop()
@@ -262,6 +283,81 @@ class Session:
         agent.approve = self.approve
         return agent
 
+    # ------------------------------------------------------------------ sesión
+    def _select_session(self, resume: str | None) -> str:
+        """Elige el id: la sesión pedida, la última guardada, o una nueva.
+
+        Con `session_persist=false` el id se genera igual: los contadores de turnos y los
+        nombres de archivo no cambian de semántica según la configuración.
+        """
+        if resume is None:
+            return self.sessions.start()
+        wanted = resume.strip()
+        if not wanted or wanted in {"last", "-"}:
+            latest = self.sessions.latest_id()
+            if latest is None:
+                self.console.print("no hay sesiones guardadas todavía; se empieza una nueva", style="warn")
+                return self.sessions.start()
+            return latest
+        self.sessions.session_id = wanted
+        return wanted
+
+    def _after_agent_built(self) -> None:
+        """Recupera el historial retomado y lee los adjuntos, con el agente ya construido."""
+        if self._resume_requested is not None:
+            loaded = self.agent.load_history(self._resume_history())
+            if loaded:
+                self._startup_notice = (
+                    f"sesión {self.session_id} retomada ({loaded} turnos en ventana, tope "
+                    f"{self.settings.max_history_messages})",
+                    "muted",
+                )
+            elif self.sessions.path_for(self.session_id).exists():
+                self._startup_notice = (f"la sesión {self.session_id} está vacía", "muted")
+            else:
+                self._startup_notice = (f"no existe la sesión {self.session_id}", "warn")
+        elif self.sessions.enabled:
+            self._startup_notice = (f"sesión {self.session_id} · recuperable con --resume", "muted")
+        self._attachments = self._read_attachments(self._pending_attach)
+        self._pending_attach = ()
+
+    def announce(self) -> None:
+        """Aviso de arranque: se imprime en el REPL, nunca al construir la sesión."""
+        if self._startup_notice is not None:
+            text, style = self._startup_notice
+            self._startup_notice = None
+            self.console.print(text, style=style)
+
+    def _resume_history(self) -> list[dict[str, Any]]:
+        """Turnos de la sesión retomada; una sesión inexistente se lee como vacía, no reviente el arranque."""
+        try:
+            return self.sessions.history(self.session_id)
+        except AutonomaError:
+            return []
+
+    def _read_attachments(self, paths: Sequence[str]) -> list[str]:
+        """Un adjunto es texto ya leído: así el modelo no lo vuelve a pedir con una herramienta."""
+        chunks: list[str] = []
+        for raw in paths:
+            try:
+                text = self.agent.fs.read_file(raw)
+            except AutonomaError as exc:
+                self.console.print(f"  no se pudo adjuntar {raw}: {safe_text(exc.user_message())}", style="err")
+                continue
+            chunks.append(f"[archivo adjunto: {raw}]\n{text}")
+        return chunks
+
+    def _persist_turn(self, prompt: str, answer: str) -> None:
+        store: SessionStore | None = getattr(self, "sessions", None)
+        if store is None:
+            return
+        try:
+            # Un turno = dos líneas: la pregunta y la respuesta, para poder reproducir la ventana.
+            store.append("user", prompt)
+            store.append("assistant", answer)
+        except AutonomaError as exc:  # una memoria que no escribe no puede matar la conversación
+            self.console.print(f"  no se pudo guardar el turno: {safe_text(exc.user_message())}", style="warn")
+
     def _ensure_notrack_key(self, settings: Settings) -> Settings:
         """Pide la clave una sola vez si hay TTY; nunca la registra como argumento."""
         if settings.has_notrack_key or not sys.stdin.isatty():
@@ -276,7 +372,9 @@ class Session:
             return settings
         return self._persist_keys(notrack=value, settings=settings)
 
-    def _persist_keys(self, *, notrack: str | None = None, brave: str | None = None, settings: Settings | None = None) -> Settings:
+    def _persist_keys(
+        self, *, notrack: str | None = None, brave: str | None = None, settings: Settings | None = None
+    ) -> Settings:
         """Guarda en `.env` y aplica como override local; el entorno del proceso no se toca."""
         base = settings if settings is not None else self.settings
         payload = save_api_keys(notrack_api_key=notrack, brave_api_key=brave, env_path=self.context.root / ".env")
@@ -327,6 +425,7 @@ class Session:
             f"shell local : {'habilitado, sin aislamiento' if self.settings.allow_commands else 'deshabilitado'}",
             f"Brave key   : {'sí' if self.settings.has_brave_key else 'no (se usará Playwright/HTML)'}",
             f"knowledge   : {self.settings.knowledge_path()}  ({len(list(self.settings.knowledge_path().glob('*.md')))} md)",
+            f"sesión      : {self.session_id} ({'en disco' if self.sessions.enabled else 'sin persistencia'})",
             f"pánico P    : {self._listener_status.state.value}",
             f"tarea       : {'en curso' if self.panic.busy else 'idle'}",
             f"trazas      : {current_trace_id() or '(sin turno activo)'}",
@@ -349,10 +448,14 @@ class Session:
         if not self.agent.notrack.configured:
             self.console.print("Configura la clave con /key antes de ejecutar prompts.", style="err")
             return int(ExitCode.CONFIGURATION)
+        if self._attachments:
+            prompt = "\n\n".join([*self._attachments, prompt])
+            self._attachments = []
         reporter = _ProgressReporter(self.console, self.render)
         reporter.start()
         try:
             answer = self.agent.run(prompt, on_event=reporter.on_event)
+            self._persist_turn(prompt, answer)
         except (PanicError, KeyboardInterrupt):
             self.panic.panic()
             reporter.stop()
@@ -400,6 +503,47 @@ class Session:
 
     def _cmd_status(self, _rest: str = "") -> bool:
         self.status()
+        return True
+
+    def _cmd_sessions(self, _rest: str = "") -> bool:
+        infos = self.sessions.list()
+        if not infos:
+            self.console.print("no hay sesiones guardadas (SESSION_PERSIST puede estar apagado)")
+            return True
+        for info in infos:
+            marker = "*" if info.session_id == self.session_id else " "
+            self.console.print(f"{marker} {info.summary()}")
+        self.console.print("[dim]/resume <id> retoma una; /forget borra la actual[/dim]")
+        return True
+
+    def _cmd_resume(self, _rest: str = "") -> bool:
+        self.session_id = self._select_session(_rest)
+        loaded = self.agent.load_history(self._resume_history())
+        self.console.print(
+            f"sesión {self.session_id}: {loaded} turnos recuperados" if loaded else f"sesión {self.session_id} vacía"
+        )
+        return True
+
+    def _cmd_forget(self, _rest: str = "") -> bool:
+        target = _rest.strip() or self.session_id
+        if target == self.session_id:
+            self._attachments = []
+        if self.sessions.delete(target) is None:
+            self.console.print(f"no existe la sesión {target}", style="warn")
+            return True
+        self.agent.reset_history()
+        self.session_id = self.sessions.start()
+        self.console.print(f"borrada {target}; se empieza la sesión {self.session_id}", style="ok")
+        return True
+
+    def _cmd_attach(self, _rest: str = "") -> bool:
+        raw = _rest.strip()
+        if not raw:
+            self.console.print("falta la ruta: /attach informes/nota.md", style="err")
+            return True
+        chunks = self._read_attachments([raw])
+        if chunks and self.agent.record("user", chunks[0]):
+            self.console.print("archivo añadido al contexto de esta sesión", style="ok")
         return True
 
     def _cmd_clear(self, _rest: str = "") -> bool:
@@ -461,6 +605,10 @@ _COMMAND_TABLE: Final[Mapping[str, CommandHandler]] = {
     "/?": Session._cmd_help,
     "/status": Session._cmd_status,
     "/clear": Session._cmd_clear,
+    "/sessions": Session._cmd_sessions,
+    "/resume": Session._cmd_resume,
+    "/attach": Session._cmd_attach,
+    "/forget": Session._cmd_forget,
     "/panic": Session._cmd_panic,
     "/kb": Session._cmd_kb,
     "/key": Session._cmd_key,
@@ -482,13 +630,25 @@ def repl(
     allow_commands: bool = False,
     global_hotkey: bool = False,
     context: RuntimeContext | None = None,
+    resume: str | None = None,
+    attach: Sequence[str] = (),
+    overrides: Mapping[str, str] | None = None,
 ) -> int:
     """Bucle interactivo (o un solo prompt con `once`) con limpieza garantizada."""
     _configure_stdio()
     # `Session` aplica el flag de comandos al cargar los ajustes: una sola decisión.
     resolved = context or RuntimeContext.detect(allow_commands=allow_commands)
-    session = Session(build_console(resolved), allow_commands=allow_commands, global_hotkey=global_hotkey, context=resolved)
+    session = Session(
+        build_console(resolved),
+        allow_commands=allow_commands,
+        global_hotkey=global_hotkey,
+        context=resolved,
+        resume=resume,
+        attach=attach,
+        overrides=overrides,
+    )
     print_banner(session.console, session.context, session.settings, session.listener_status)
+    session.announce()
     try:
         if once:
             return session.run_prompt(once)
@@ -534,6 +694,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plain", action="store_true", help="texto simple, sin paneles ni animaciones")
     parser.add_argument("--reduced-motion", action="store_true", help="progreso estático")
     parser.add_argument("--quiet", action="store_true", help="ocultar previsualizaciones de resultados")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help="retomar un historial guardado: el último si no das ID",
+    )
+    parser.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        metavar="RUTA",
+        help="meter un archivo en el contexto inicial (repetible)",
+    )
+    parser.add_argument("--no-persist", action="store_true", help="no escribir sesiones en disco en esta corrida")
+    parser.add_argument(
+        "--max-steps", type=int, default=None, metavar="N", help="tope de iteraciones herramienta-modelo (1-200)"
+    )
     parser.add_argument("prompt", nargs="*", help="instrucción única (sin REPL)")
     parser.add_argument("--version", action="version", version=f"{__app_name__} {__version__}")
     return parser
@@ -566,7 +745,9 @@ def build_context(args: argparse.Namespace) -> RuntimeContext:
 NO_PAUSE_ENV = "AUTONOMA_NO_PAUSE"
 
 
-def should_pause_on_exit(*, frozen: bool, has_prompt: bool, interactive: bool, diagnostic: bool, disabled: bool) -> bool:
+def should_pause_on_exit(
+    *, frozen: bool, has_prompt: bool, interactive: bool, diagnostic: bool, disabled: bool
+) -> bool:
     """Si hay que esperar un Enter antes de cerrar la ventana.
 
     Doble clic sobre `Autonoma.exe` abre una consola que desaparece con el proceso: un
@@ -610,12 +791,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.selftest:
         raise SystemExit(run_selftest(as_json=bool(args.json), data_root=context.data_root))
     prompt = " ".join(args.prompt).strip() or None
+    overrides: dict[str, str] = {}
+    if args.no_persist:
+        overrides["SESSION_PERSIST"] = "false"
+    if args.max_steps is not None:
+        overrides["MAX_TOOL_ITERATIONS"] = str(args.max_steps)
     try:
         code = repl(
             once=prompt,
             allow_commands=bool(args.allow_commands),
             global_hotkey=bool(args.global_hotkey),
             context=context,
+            resume=args.resume,
+            attach=tuple(args.attach),
+            overrides=overrides,
         )
     except (AutonomaError, ValueError, OSError) as exc:
         detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)

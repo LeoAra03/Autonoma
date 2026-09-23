@@ -24,7 +24,7 @@ from typing import Any, Final
 from autonoma.errors import ConfigurationError, ProcessLaunchError, ProcessTimeoutError
 from autonoma.key_handler import PanicController
 
-__all__ = ["CommandResult", "ProcessSupervisor"]
+__all__ = ["CommandResult", "ProcessSupervisor", "is_windows"]
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +275,11 @@ class ProcessSupervisor:
                 },
             )
         return stdout_tail, stderr_tail
+
+
+def is_windows() -> bool:
+    """Versión pública del chequeo: el gestor de trabajos también necesita saber la plataforma."""
+    return _is_windows()
 
 
 def _is_windows() -> bool:

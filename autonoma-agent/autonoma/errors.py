@@ -93,72 +93,86 @@ class ErrorTraits:
 
 _TRAITS: Final[Mapping[ErrorCode, ErrorTraits]] = {
     ErrorCode.CONFIGURATION: ErrorTraits(
-        severity=logging.ERROR, retryable=False,
+        severity=logging.ERROR,
+        retryable=False,
         exit_code=ExitCode.CONFIGURATION,
         hint="Corrige .env o config.json y vuelve a iniciar.",
     ),
     ErrorCode.TOOL_CONTRACT: ErrorTraits(
-        severity=logging.WARNING, retryable=False,
+        severity=logging.WARNING,
+        retryable=False,
         exit_code=ExitCode.INTERNAL,
         hint="La herramienta se rechazó antes de ejecutarse; reformula la instrucción.",
     ),
     ErrorCode.APPROVAL_REQUIRED: ErrorTraits(
-        severity=logging.INFO, retryable=False,
+        severity=logging.INFO,
+        retryable=False,
         exit_code=ExitCode.APPROVAL_REQUIRED,
         hint="Requiere aprobación humana explícita en una TTY interactiva.",
     ),
     ErrorCode.PATH_POLICY: ErrorTraits(
-        severity=logging.WARNING, retryable=False,
+        severity=logging.WARNING,
+        retryable=False,
         exit_code=ExitCode.FILESYSTEM,
         hint="Usa rutas absolutas de unidad sin enlaces simbólicos ni reparse points.",
     ),
     ErrorCode.FILESYSTEM_IO: ErrorTraits(
-        severity=logging.ERROR, retryable=False,
+        severity=logging.ERROR,
+        retryable=False,
         exit_code=ExitCode.FILESYSTEM,
         hint="Revisa permisos y existencia de la ruta; el agente no reintenta operaciones destructivas.",
     ),
     ErrorCode.PROCESS_LAUNCH: ErrorTraits(
-        severity=logging.ERROR, retryable=False,
+        severity=logging.ERROR,
+        retryable=False,
         exit_code=ExitCode.FILESYSTEM,
         hint="El programa no existe o no puede iniciarse en ese directorio.",
     ),
     ErrorCode.PROCESS_TIMEOUT: ErrorTraits(
-        severity=logging.WARNING, retryable=True,
+        severity=logging.WARNING,
+        retryable=True,
         exit_code=ExitCode.FILESYSTEM,
         hint="Aumenta timeout o divide el trabajo; el árbol del proceso fue terminado.",
     ),
     ErrorCode.NETWORK_POLICY: ErrorTraits(
-        severity=logging.WARNING, retryable=False,
+        severity=logging.WARNING,
+        retryable=False,
         exit_code=ExitCode.NETWORK,
         hint="Solo se permiten destinos HTTP(S) públicos en puertos estándar.",
     ),
     ErrorCode.PROVIDER_UNAVAILABLE: ErrorTraits(
-        severity=logging.ERROR, retryable=True,
+        severity=logging.ERROR,
+        retryable=True,
         exit_code=ExitCode.PROVIDER,
         hint="Verifica la conexión y la URL del proveedor; reintenta más tarde.",
     ),
     ErrorCode.PROVIDER_HTTP: ErrorTraits(
-        severity=logging.ERROR, retryable=False,
+        severity=logging.ERROR,
+        retryable=False,
         exit_code=ExitCode.PROVIDER,
         hint="Revisa la clave/cuota del proveedor con /key y /status.",
     ),
     ErrorCode.PROVIDER_CONTRACT: ErrorTraits(
-        severity=logging.ERROR, retryable=True,
+        severity=logging.ERROR,
+        retryable=True,
         exit_code=ExitCode.PROVIDER,
         hint="La respuesta no cumple el contrato; reintenta o cambia de modelo.",
     ),
     ErrorCode.SEARCH_BACKEND: ErrorTraits(
-        severity=logging.WARNING, retryable=True,
+        severity=logging.WARNING,
+        retryable=True,
         exit_code=ExitCode.SEARCH,
         hint="Ningún backend de búsqueda respondió; agrega BRAVE_API_KEY para mayor fiabilidad.",
     ),
     ErrorCode.CANCELLED: ErrorTraits(
-        severity=logging.INFO, retryable=True,
+        severity=logging.INFO,
+        retryable=True,
         exit_code=ExitCode.CANCELLED,
         hint="Tarea detenida por el usuario; el estado en disco puede estar parcial.",
     ),
     ErrorCode.INTERNAL: ErrorTraits(
-        severity=logging.ERROR, retryable=False,
+        severity=logging.ERROR,
+        retryable=False,
         exit_code=ExitCode.INTERNAL,
         hint="Falla interna; revisa logs/autonoma.log con el trace_id indicado.",
     ),
@@ -326,8 +340,13 @@ class SearchBackendError(AutonomaError):
 
     code: ClassVar[ErrorCode] = ErrorCode.SEARCH_BACKEND
 
-    def __init__(self, message: str, *, failures: tuple[tuple[str, str], ...], context: Mapping[str, Any] | None = None) -> None:
-        super().__init__(message, context={**(context or {}), "backends": "; ".join(f"{name}: {detail}" for name, detail in failures)})
+    def __init__(
+        self, message: str, *, failures: tuple[tuple[str, str], ...], context: Mapping[str, Any] | None = None
+    ) -> None:
+        super().__init__(
+            message,
+            context={**(context or {}), "backends": "; ".join(f"{name}: {detail}" for name, detail in failures)},
+        )
         self.failures: tuple[tuple[str, str], ...] = failures
 
 

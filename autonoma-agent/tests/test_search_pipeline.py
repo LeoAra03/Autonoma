@@ -80,8 +80,12 @@ def test_brave_api_backend_maps_extra_snippets(tmp_path: Path) -> None:
     payload = {
         "web": {
             "results": [
-                    {"title": "Uno", "url": "https://uno.example", "description": "resumen",
-                     "extra_snippets": ["e1", "e2", "e3", "e4"]},
+                {
+                    "title": "Uno",
+                    "url": "https://uno.example",
+                    "description": "resumen",
+                    "extra_snippets": ["e1", "e2", "e3", "e4"],
+                },
             ]
         }
     }
@@ -100,7 +104,9 @@ def test_brave_api_backend_reports_http_and_contract_failures(tmp_path: Path) ->
         BraveApiBackend(engine).search("q", 5)
     assert excinfo.value.status_code == 429 and excinfo.value.retryable
 
-    broken = engine_for(lambda request: httpx.Response(200, json={"web": {"results": "no-es-lista"}}), tmp_path, brave_api_key="k")
+    broken = engine_for(
+        lambda request: httpx.Response(200, json={"web": {"results": "no-es-lista"}}), tmp_path, brave_api_key="k"
+    )
     with pytest.raises(ProviderContractError):
         BraveApiBackend(broken).search("q", 5)
     engine.close()
@@ -124,7 +130,9 @@ def test_cascade_skips_unusable_backends_and_aggregates_reasons(tmp_path: Path) 
 
 
 def test_cascade_returns_the_first_healthy_backend(tmp_path: Path) -> None:
-    engine = engine_for(lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=SERP_HTML.encode()), tmp_path)
+    engine = engine_for(
+        lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=SERP_HTML.encode()), tmp_path
+    )
     engine.brave_api_key = ""
     hits = engine.search("consulta", 2)
     assert [hit.url for hit in hits] == ["https://uno.example/pagina", "https://dos.example/pagina"]
@@ -133,7 +141,9 @@ def test_cascade_returns_the_first_healthy_backend(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------ fetch_url
 def test_fetch_url_refuses_non_text_and_oversized_bodies(tmp_path: Path) -> None:
-    binary = engine_for(lambda request: httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF"), tmp_path)
+    binary = engine_for(
+        lambda request: httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF"), tmp_path
+    )
     assert "contenido no textual" in binary.fetch_url("https://example.com/a.pdf")
     huge = engine_for(
         lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=b"<p>" + b"x" * 3_000_000),
@@ -204,7 +214,9 @@ def test_parallel_fetches_are_bounded(tmp_path: Path) -> None:
 # ----------------------------------------------------------------- resultados
 def test_research_saves_a_bundle_and_formats_a_preview(tmp_path: Path) -> None:
     engine = engine_for(
-        lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html><body>hallazgo</body></html>"),
+        lambda request: httpx.Response(
+            200, headers={"content-type": "text/html"}, content=b"<html><body>hallazgo</body></html>"
+        ),
         tmp_path,
     )
     engine.search = lambda query, count=None: (  # type: ignore[method-assign]
@@ -225,7 +237,7 @@ def test_research_survives_pages_that_fail_to_download(tmp_path: Path, monkeypat
     """Una página caída no tira el turno: se entrega lo que sí se pudo leer."""
     import autonoma.search_engine as module
 
-    monkeypatch.setattr(module, "validate_public_url", lambda url: url)
+    monkeypatch.setattr(module, "validate_public_url", lambda url, **kwargs: url)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "malo" in request.url.host:

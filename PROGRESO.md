@@ -151,3 +151,35 @@ Cambios de comportamiento que conviene conocer:
 7. Distribución en un comando: `scripts/bootstrap.py` (npm start, `Run-Autonoma.bat`,
    `./run-autonoma.sh`) y `scripts/make_bundle.py` (ZIP portable con LEEME y `.sha256`);
    ver [INSTALL.md](INSTALL.md).
+
+## Tanda 2026-09-23 — «que sea capaz de lograrlo todo»
+
+Se cerraron las carencias que quedaron listadas tras la auditoría de capacidades. Cada una
+con su módulo, sus pruebas y su puerta de seguridad intacta.
+
+| Habilidad antes inexistente | Cómo quedó | Pieza clave |
+| --- | --- | --- |
+| Editar un archivo sin reescribirlo | `edit_file` con sustitución exacta y atómica; ambigüedad (>1 coincidencia sin `all`) es un error, no una adivinanza; `append_file` para anexar | `autonoma/text_ops.py` |
+| Ver un archivo grande entero | ventanas por líneas (`start_line`/`max_lines`) con cabecera `ruta:1-40 de N`; tope de lectura configurable (`READ_LIMIT_CHARS`) | `read_window` |
+| Buscar en disco | `search_files` (`grep -n`) sin seguir symlinks, saltando binarios y carpetas de artefactos; `glob` con semántica `Path.glob` (encontraba `**/*.py` pero no `README.md`: corregido) | `grep_tree` |
+| Leer una página larga | `fetch_url` devuelve ventanas y avista cuántos caracteres quedan (`start_char`); memo de 1 página para no re-descargar; `save=true` la archiva | `SearchEngine.fetch_url` |
+| Funcionar sin clave de NoTrack | endpoint local: `http` admitido **sólo** en loopback, clave opcional, `--doctor` lo explica | `notrack_client.validate_base_url` |
+| Recordar entre ejecuciones | sesiones `sessions/<id>.jsonl` (0600, un turno por línea); `--resume`, `/sessions`, `/resume`, `/forget`, `--attach`, `/attach`, `--no-persist` | `autonoma/sessions.py` |
+| Procesos que no terminan en segundos | `spawn_command` + `job_status`/`job_output`/`kill_job`; salida a `jobs/*.log` (0600), tope duro de vivos, archivo de trabajo archivado 64 entradas | `autonoma/jobs.py` |
+| Límites bajos | iteraciones 1–200, llamadas por vuelta 1–32, historia 2–512 mensajes, lecturas hasta 400 000 caracteres, timeout de comando hasta 1800 s | `NUMERIC_BOUNDS` |
+| Turnos de investigación lentos | las llamadas de sólo lectura de una vuelta corren en paralelo (1–8 hilos); en cuanto algo escribe, se vuelve a serie y el orden del payload se conserva | `Agent._run_tool_calls` |
+| Actualizarse | `npm run update` / `python scripts/bootstrap.py update`: fetch + `merge --ff-only` + re-instalación del entorno; se niega con árbol sucio; en bundle portable dice qué bajar | `scripts/bootstrap.py` |
+
+Decisiones de seguridad que **no** se movieron: nada de sandbox simulado, la aprobación humana
+sigue siendo `SI` explícito por operación, las rutas protegidas se respetan (y `force` no las
+elude), `ALLOW_PRIVATE_NETWORK` es opt-in explícito para tocar la red local, y un trabajo en
+segundo plano muere con la sesión (`panic.register_cleanup` + `AgentResources.close`).
+
+Puerta de calidad de la tanda: 532 pruebas que pasan en ~7 s, cobertura 87,1 % (puerta 80 %),
+`ruff check` y `ruff format --check` limpios, `mypy --strict` en Linux y `--platform win32`
+sin quejas. Nuevos archivos: `text_ops.py`, `sessions.py`, `jobs.py`, `tests/test_file_editing.py`,
+`tests/test_sessions.py`, `tests/test_jobs.py`, `tests/test_tool_concurrency.py`.
+
+Lo que sigue sin poder hacer (a propósito, por ahora): ver imágenes o PDF adjuntos, leer
+binarios (UTF-8 estricto para editar, `errors="replace"` para mirar), y actuar fuera de la
+raíz de datos sin aprobación. Nada de eso se resolvió fingiendo capacidad: se documenta.

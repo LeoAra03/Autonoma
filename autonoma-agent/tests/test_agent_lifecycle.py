@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from autonoma.agent import Agent, build_agent
+from autonoma.agent import SYSTEM_PROMPT, Agent, build_agent
 from autonoma.config import Settings
 from autonoma.errors import ErrorCode
 from autonoma.filesystem import FileSystemManager
@@ -16,12 +16,16 @@ from autonoma.key_handler import PanicController, PanicError
 def PanicError_() -> type[Exception]:
     """La excepción de cancelación vive en key_handler; el test la referencia sin importarla dos veces."""
     return PanicError
+
+
 from autonoma.notrack_client import NoTrackClient
 from autonoma.observability import MetricsRegistry
 from autonoma.search_engine import SearchEngine
 
 
-def scripted_client(replies: list[dict[str, object]], *, seen: list[list[dict[str, str]]] | None = None) -> NoTrackClient:
+def scripted_client(
+    replies: list[dict[str, object]], *, seen: list[list[dict[str, str]]] | None = None
+) -> NoTrackClient:
     """Cliente NoTrack con respuestas fijas: el bucle del agente, sin red."""
     client = NoTrackClient("test-key-123456", PanicController())
     iterator = iter(replies)
@@ -49,7 +53,14 @@ def test_successful_turn_counts_once_and_reports_timing(tmp_path: Path) -> None:
     metrics = MetricsRegistry()
     client = NoTrackClient("test-key-123456", panic)
     client.chat = lambda *a, **k: message("listo")  # type: ignore[method-assign]
-    agent = Agent(Settings(notrack_api_key="k"), panic, client, SearchEngine(panic, tmp_path), FileSystemManager(panic), metrics=metrics)
+    agent = Agent(
+        Settings(notrack_api_key="k"),
+        panic,
+        client,
+        SearchEngine(panic, tmp_path),
+        FileSystemManager(panic),
+        metrics=metrics,
+    )
     events: list[tuple[str, str]] = []
     assert agent.run("pregunta", lambda kind, text: events.append((kind, text))) == "listo"
     counters = metrics.counters()
@@ -169,3 +180,12 @@ def test_cancellation_leaves_no_busy_flag_or_live_processes(tmp_path: Path) -> N
     assert not panic.busy
     assert fs.active_processes == 0
     panic.reset()
+
+
+@pytest.mark.parametrize(
+    "needle",
+    ["edit_file", "start_line", "search_files", "fetch_url", "start_char", "spawn_command", "job_output", "kill_job"],
+)
+def test_system_prompt_teaches_every_capability(needle: str) -> None:
+    """Una herramienta que el modelo no sabe que existe no existe: el prompt es parte del contrato."""
+    assert needle in SYSTEM_PROMPT

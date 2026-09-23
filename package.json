@@ -20,7 +20,8 @@
     "typecheck": "node scripts/bootstrap.mjs types",
     "bench": "node scripts/bootstrap.mjs bench",
     "build": "node scripts/bootstrap.mjs build",
-    "clean": "node scripts/bootstrap.mjs clean"
+    "clean": "node scripts/bootstrap.mjs clean",
+    "update": "node scripts/bootstrap.mjs update"
   },
   "keywords": [
     "agente",

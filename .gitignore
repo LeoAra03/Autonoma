@@ -9,3 +9,8 @@ config.json
 htmlcov/
 
 .cache/
+
+# Datos de una sesión local: historial de conversación y logs de trabajos en segundo plano.
+sessions/
+jobs/
+logs/

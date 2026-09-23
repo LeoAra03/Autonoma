@@ -25,7 +25,9 @@ class WaitingPanic(PanicController):
         return False
 
 
-def client_for(handler: Any, *, retries: int = 3, backoff: float = 0.0, panic: PanicController | None = None) -> NoTrackClient:
+def client_for(
+    handler: Any, *, retries: int = 3, backoff: float = 0.0, panic: PanicController | None = None
+) -> NoTrackClient:
     client = NoTrackClient(
         "sk-prueba-123456",
         panic if panic is not None else PanicController(),
@@ -173,9 +175,7 @@ def test_streaming_requires_a_terminal_event_and_rejects_partial_tools() -> None
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, content=sse, headers={"content-type": "text/event-stream"}
-        )
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
 
     client = client_for(handler)
     collected: list[str] = []

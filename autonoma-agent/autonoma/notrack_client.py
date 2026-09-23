@@ -12,6 +12,7 @@ Refuerzo respecto a la versión anterior:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -46,6 +47,7 @@ __all__ = [
 ]
 
 DEFAULT_BASE_URL: Final[str] = DEFAULT_NOTRACK_BASE_URL
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "::"})
 DEFAULT_MODEL: Final[str] = DEFAULT_NOTRACK_MODEL
 NoTrackError = ProviderError
 
@@ -129,20 +131,20 @@ class NoTrackClient:
 
     # ------------------------------------------------------------------ recursos
     @property
+    def local_endpoint(self) -> bool:
+        """El endpoint es esta máquina: no hace falta TLS ni clave para hablar con él."""
+        return is_loopback_host(urlsplit(self.base_url).hostname or "")
+
+    @property
     def configured(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) or self.local_endpoint
 
     def ensure_client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(
                 base_url=self.base_url,
                 timeout=httpx.Timeout(self.timeout, connect=15.0),
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "User-Agent": f"Autonoma/{self._app_version()}",
-                },
+                headers=_build_headers(self.api_key, self._app_version()),
                 follow_redirects=False,
                 trust_env=False,
             )
@@ -332,11 +334,12 @@ class NoTrackClient:
         return text
 
     def _require_key(self) -> None:
-        if not self.configured:
-            raise ProviderUnavailableError(
-                "Falta NOTRACK_API_KEY. Créalas en https://notrack.ai/api-keys "
-                "y pégala con /key o en el archivo .env"
-            )
+        if self.configured:
+            return
+        raise ProviderUnavailableError(
+            "Falta NOTRACK_API_KEY. Créalas en https://notrack.ai/api-keys y pégala con /key "
+            "o en el archivo .env; o apunta NOTRACK_BASE_URL a un servidor local (http://localhost:…)"
+        )
 
     def _payload(
         self,
@@ -539,19 +542,49 @@ def _positive_int(value: int, minimum: int, maximum: int) -> int:
     return number
 
 
-def validate_base_url(base_url: str) -> str:
-    """HTTPS obligatorio, sin credenciales/query/fragmento; normaliza la barra final."""
+def _build_headers(api_key: str, version: str) -> dict[str, str]:
+    """Cabeceras comunes del cliente: `Authorization` sólo cuando hay clave que mandar."""
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"Autonoma/{version}",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def is_loopback_host(host: str) -> bool:
+    """`True` si el host es esta máquina: el único lugar donde se admite `http` y clave vacía."""
+    cleaned = (host or "").strip().lower().strip("[]")
+    if cleaned in _LOOPBACK_HOSTS or cleaned.endswith(".localhost"):
+        return True
+    try:
+        return bool(ipaddress.ip_address(cleaned).is_loopback)
+    except ValueError:
+        return False
+
+
+def validate_base_url(base_url: str, *, allow_loopback_http: bool = True) -> str:
+    """HTTPS obligatorio salvo en loopback, sin credenciales/query/fragmento.
+
+    El matiz importa: un servidor de inferencia propio (`http://localhost:11434`, LM Studio en
+    `:1234`) vive en la máquina del usuario y no habla TLS ni pide clave. Permitir `http` sólo
+    ahí no abre la puerta a bajar la seguridad del proveedor remoto, que sigue exigiendo HTTPS.
+    """
     cleaned = (base_url or DEFAULT_BASE_URL).rstrip("/")
     parsed = urlsplit(cleaned)
+    allowed = {"https", "http"} if allow_loopback_http and is_loopback_host(parsed.hostname or "") else {"https"}
     if (
-        parsed.scheme != "https"
+        parsed.scheme not in allowed
         or not parsed.hostname
         or parsed.username
         or parsed.password
         or parsed.query
         or parsed.fragment
     ):
-        raise ConfigurationError("NOTRACK_BASE_URL requiere HTTPS, sin credenciales, query ni fragmento")
+        raise ConfigurationError(
+            "NOTRACK_BASE_URL requiere HTTPS (se admite http sólo en loopback, p. ej. "
+            "http://localhost:11434) y no puede llevar credenciales, query ni fragmento"
+        )
     return cleaned
-
-

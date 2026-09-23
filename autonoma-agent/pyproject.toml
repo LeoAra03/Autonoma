@@ -103,11 +103,17 @@ builtins-ignorelist = ["id", "type", "format", "input", "print"]
 "autonoma/cli.py" = ["ARG002", "S603", "SLF001", "T201"]
 # Escritura atómica de `.env`/`config.json`: `os.chmod` antes de `os.replace` para que
 # el secreto nunca exista en el temporal con permisos heredados. `Path` no ofrece ese orden.
-"autonoma/config.py" = ["PTH101", "PTH105"]
+# `0.0.0.0` y `::` aparecen como literales de la lista de hosts loopback admitidos, no como bind.
+"autonoma/config.py" = ["PTH101", "PTH105", "S104"]
+# Segundo plano a propósito: `prepare_command` ya decidió la shell y `terminate_process` el árbol.
+"autonoma/jobs.py" = ["S603", "S604", "PTH101"]
+"autonoma/notrack_client.py" = ["FBT001", "FBT002", "PLR0913", "S104"]
+# Escrita atómica del jsonl: `os.chmod`/`os.unlink` antes de `os.replace` sobre el mismo
+# temporal (devuelto como `str` por `mkstemp`), igual que `.env`.
+"autonoma/sessions.py" = ["PTH101", "PTH105", "PTH108"]
 "autonoma/diagnostics.py" = ["T201"]
 "autonoma/filesystem.py" = ["PTH101", "PTH105", "PTH108", "S603"]
 "autonoma/network.py" = ["S", "TRY400"]
-"autonoma/notrack_client.py" = ["FBT001", "FBT002", "PLR0913"]
 "autonoma/presentation.py" = ["T201"]
 "autonoma/processes.py" = ["S603", "S607"]
 "autonoma/search_engine.py" = ["FBT001", "FBT002", "PLR0913", "TRY400"]

@@ -61,6 +61,7 @@ del repo se reutiliza.
 | `npm run bench` | microbenchmarks; con `--baseline` es puerta anti-regresión |
 | `npm run build` | PyInstaller: `autonoma-agent/dist/Autonoma` / `Autonoma.exe` |
 | `npm run clean` | borra el `.venv` para empezar de cero |
+| `npm run update` | trae la última versión (git) y re-sincroniza el entorno; en un bundle portable dice qué bajar |
 
 Si prefieres decirle qué Python usar (varios instalados, o uno viejo en el PATH):
 
@@ -105,6 +106,8 @@ autonoma "tu instrucción"
 - El agente vive en una sola ventana: escribes, él propone acciones sobre tus archivos o la web, y
   **cada operación local pide aprobación explícita escribiendo `SI`**.
 - Tus notas quedan en `knowledge_base/` y el registro local en `logs/autonoma.jsonl`
+- La conversación se guarda en `sessions/<id>.jsonl` (un turno por línea, permisos 0600) y la salida de los procesos en
+  segundo plano en `jobs/`. `--no-persist` evita que se escriba nada y `/forget` borra una sesión concreta
   (una línea JSON por evento, con `trace_id` para atar todo un turno).
 - `Ctrl+C` cancela lo que esté haciendo; `--global-hotkey` añade la tecla `P` como botón de pánico.
 - `/help` lista los comandos (`/kb`, `/status`, `/key`, `/brave`, `/exit`).
@@ -117,9 +120,14 @@ autonoma "tu instrucción"
 
 | Qué | Dónde |
 | --- | --- |
-| Tus notas (`knowledge_base/`) y el registro (`logs/autonoma.jsonl`) | en la raíz de datos activa: junto al `.exe` (modo portable) o en `autonoma-agent/` (checkout) |
+| Tus notas (`knowledge_base/`), el registro (`logs/autonoma.jsonl`), las sesiones (`sessions/`) y la salida de los trabajos (`jobs/`) | en la raíz de datos activa: junto al `.exe` (modo portable) o en `autonoma-agent/` (checkout); con permisos privados y fuera de git |
 | La clave | `autonoma-agent/.env` (o `.env` al lado del `.exe`); nunca en la línea de órdenes ni en el registro |
 | Cambiar la raíz para una sesión | `--data-dir <carpeta>` (o la variable `AUTONOMA_HOME`) |
+
+`npm run update` es el único comando que toca el código: en un checkout hace `fetch` + `merge --ff-only` y re-instala el
+entorno; si hay cambios locales sin commitear se niega a tocar nada (pasa `--allow-dirty` sólo si sabes qué haces). En un
+bundle portable no se reescribe a sí mismo: dice qué ZIP bajar y deja `.env`, `knowledge_base/`, `sessions/` y `logs/`
+intactos.
 
 `npm run status` (o `autonoma --doctor --json`) te enseña exactamente qué raíz está usando y
 de dónde viene (`flag`, `env`, `frozen_executable`, `checkout` o `user_config`).

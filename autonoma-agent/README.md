@@ -58,6 +58,14 @@ python -m autonoma --selftest --json   # autoensayo del paquete/ejecutable, sin 
 python -m autonoma --global-hotkey
 # Solo si aceptas ejecutar shell sin aislamiento:
 python -m autonoma --allow-commands
+# Conversación con memoria: retomar la última sesión, o una concreta
+python -m autonoma --resume
+python -m autonoma --resume 2026-09-23-181530-0a3e
+# Empezar con archivos ya leídos en el contexto (repetible)
+python -m autonoma --attach informe.md --attach datos.csv "resume esto"
+# Una pasada sin dejar rastro en disco, o con más pasos por turno
+python -m autonoma --no-persist "…"
+python -m autonoma --max-steps 60 "revisa todo el paquete y arregla lo que falle"
 ```
 
 | Comando | Función |
@@ -67,6 +75,10 @@ python -m autonoma --allow-commands
 | `/status` | Estado de claves sin mostrar fragmentos, modelo, notas y listener |
 | `/kb` | Notas recientes |
 | `/clear` | Borrar la conversación de memoria, no los archivos de notas |
+| `/sessions` | Lista las sesiones guardadas (id, turnos, antigüedad) |
+| `/resume [id]` | Cambiar la ventana de historial a otra sesión guardada |
+| `/attach <ruta>` | Meter un archivo en el contexto de la sesión actual |
+| `/forget [id]` | Borrar el historial visible **y** el archivo de esa sesión |
 | `/panic` | Activar cancelación entre tareas; no puede introducirse durante una tarea síncrona |
 | `/quit` | Cerrar la sesión |
 
@@ -82,6 +94,38 @@ Tres preferencias sencillas, también persistibles en el entorno de tu shell:
 3. Menos detalle: `--quiet` o `AUTONOMA_QUIET=1` oculta vistas previas de resultados, no aprobaciones.
 
 No se ha certificado compatibilidad con lectores de pantalla: el modo simple facilita su evaluación.
+
+## Qué puede hacer
+
+El modelo decide, pero sólo con las herramientas del contrato —todas tipadas y validadas antes de ejecutarse:
+
+| Herramienta | Para qué |
+| --- | --- |
+| `web_search`, `fetch_url` | Buscar y leer la web. `fetch_url` devuelve una **ventana** con aviso de cuántos caracteres quedan: se continúa con `start_char` sin volver a descargar, y `save=true` la deja en `knowledge_base/`. |
+| `read_file` | Lectura acotada; con `start_line`/`max_lines` recorre archivos grandes sin pedirlos enteros. |
+| `edit_file` | Sustitución exacta de un fragmento único. Si hay más de una coincidencia y no pasas `all=true`, **rechaza** la edición y el archivo queda intacto. |
+| `write_file`, `append_file`, `mkdir`, `copy_path`, `move_path`, `delete_path` | Escritos y movimientos, atómicos, dentro de la política de rutas. |
+| `search_files` | `grep -n` sobre el árbol: salta binarios, symlinks y carpetas de artefactos. |
+| `save_knowledge`, `read_knowledge`, `list_knowledge` | Memoria de trabajo reutilizable. |
+| `run_command` | Shell local de un solo golpe, con `--allow-commands` y aprobación por comando. |
+| `spawn_command`, `job_status`, `job_output`, `kill_job` | Lo que no termina en segundos (servidores, compilaciones, `npm test` largo): se lanza en segundo plano, la salida va a un archivo y se lee por trozos. |
+
+Cualquier herramienta que escriba o lance procesos pide aprobación humana explícita (`SI`). No hay sandbox simulado: lo que el
+agente puede hacer es lo que puedes hacer tú, y por eso se pregunta.
+
+### Usar un modelo local, sin clave
+
+Autonoma habla OpenAI-compatible, así que Ollama, LM Studio, llama.cpp o vLLM valen. En `config.json` o el entorno:
+
+```bash
+export NOTRACK_BASE_URL="http://127.0.0.1:11434/v1"   # Ollama
+export NOTRACK_MODEL="qwen2.5:14b"
+unset NOTRACK_API_KEY                                   # opcional en loopback
+```
+
+`http` (sin TLS) **sólo** se acepta si el host es de esta máquina (`localhost`, `127.0.0.1`, `::1`, `*.localhost`):
+es la firma de un servidor propio, no un permiso para bajar la guardia. Cualquier otro endpoint sin HTTPS se rechaza,
+igual que antes. El `--doctor` lo distingue: en loopback dice que no hace falta clave en lugar de pedirte una.
 
 ## Seguridad y privacidad
 
@@ -124,9 +168,16 @@ Precedencia: entorno del proceso > `.env` > `config.json` > valores por defecto.
 }
 ```
 
-Límites: pasos 1–50; timeouts de configuración 1–300 s; resultados 1–20; páginas 0–5.
-También se aceptan `MAX_TOOL_ITERATIONS`, `HTTP_TIMEOUT`, `COMMAND_TIMEOUT`, `SEARCH_RESULTS`,
-`FETCH_PAGES`, `KNOWLEDGE_DIR`, `LOG_DIR`, `NOTRACK_BASE_URL`, `NOTRACK_MODEL` y las dos API keys.
+Límites (todos configurables, ninguno inventado por el modelo): iteraciones por turno 1–200 (24), llamadas por vuelta
+1–32 (16), ésas en paralelo 1–8 (4), mensajes en ventana 2–512 (64), timeout HTTP 1–300 s, timeout de comando 1–1800 s,
+resultados 1–20, páginas precargadas 0–5, ventana de lectura 1 000–400 000 caracteres (80 000), tope de una página
+100 000–16 000 000 bytes y texto devuelto por `fetch_url` 1 000–200 000 caracteres.
+También se aceptan `MAX_TOOL_ITERATIONS`, `MAX_TOOL_CALLS_PER_TURN`, `MAX_PARALLEL_TOOL_CALLS`, `MAX_HISTORY_MESSAGES`,
+`HTTP_TIMEOUT`, `COMMAND_TIMEOUT`, `SEARCH_RESULTS`, `FETCH_PAGES`, `READ_LIMIT_CHARS`, `FETCH_CHAR_LIMIT`,
+`PAGE_MAX_BYTES`, `KNOWLEDGE_DIR`, `LOG_DIR`, `SESSIONS_DIR`, `JOBS_DIR`, `NOTRACK_BASE_URL`, `NOTRACK_MODEL` y las dos
+API keys. Dos interruptores de seguridad tienen nombre propio: `SESSION_PERSIST` (por defecto `true`; si se apaga, nada
+queda en disco) y `ALLOW_PRIVATE_NETWORK` (por defecto `false`; si se enciende, `fetch_url` y la investigación pueden
+dirigirse a la red local, lo que abre el paso a metadatos de nubes y servicios internos — úsalo sólo a sabiendas).
 Configuraciones numéricas o JSON inválidas producen un error explícito.
 
 En un checkout, notas/logs/configuración están en este directorio; en PyInstaller, junto al ejecutable.

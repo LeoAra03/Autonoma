@@ -53,8 +53,7 @@ logger = logging.getLogger(__name__)
 BRAVE_SEARCH_URL: Final[str] = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_WEB_URL: Final[str] = "https://search.brave.com/search"
 USER_AGENT: Final[str] = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 _MAX_PAGE_BYTES: Final[int] = 2_000_000
 _TEXT_LIMIT: Final[int] = 12_000
@@ -62,7 +61,15 @@ _MAX_PARALLEL_FETCHES: Final[int] = 3
 _MAX_EXTRA_SNIPPETS: Final[int] = 3
 _MAX_FETCH_PAGES: Final[int] = 5
 _BLOCKED_TAGS: Final[tuple[str, ...]] = (
-    "script", "style", "noscript", "svg", "iframe", "header", "footer", "nav", "form"
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "iframe",
+    "header",
+    "footer",
+    "nav",
+    "form",
 )
 _RESULT_SELECTORS: Final[tuple[str, ...]] = ("div.snippet", "div[data-type='web']", "div.fdb", "div#results div")
 _SNIPPET_SELECTORS: Final[tuple[str, ...]] = (".snippet-description", ".snippet-content", "p")
@@ -304,6 +311,17 @@ def _snippet_of(node: Any) -> str:
     return ""
 
 
+def _slice_window(text: str, *, start: int, limit: int) -> str:
+    """Recorte con aviso del resto: sin esa pista el modelo no sabe si debe pedir más."""
+    if start >= len(text):
+        return f"[no hay texto en el desplazamiento {start}; la página tiene {len(text)} caracteres]"
+    body = text[start : start + limit]
+    remaining = len(text) - (start + len(body))
+    if remaining <= 0:
+        return body
+    return f"{body}\n\n…[{remaining} caracteres más; continúa con start_char={start + len(body)}]"
+
+
 class SearchEngine:
     """Orquesta backends, extracción de páginas y el almacén de notas."""
 
@@ -317,6 +335,9 @@ class SearchEngine:
         fetch_pages: int = 3,
         *,
         max_parallel_fetches: int = _MAX_PARALLEL_FETCHES,
+        text_limit: int = _TEXT_LIMIT,
+        max_page_bytes: int = _MAX_PAGE_BYTES,
+        allow_private_network: bool = False,
     ) -> None:
         self.panic = panic
         self.knowledge_dir = Path(knowledge_dir)
@@ -326,6 +347,12 @@ class SearchEngine:
         self.default_count = default_count
         self.fetch_pages = fetch_pages
         self.max_parallel_fetches = max(1, min(max_parallel_fetches, _MAX_PARALLEL_FETCHES))
+        # Ventanas de texto y tope de descarga: configurables porque 12 000 caracteres no
+        # cubren una página de documentación, y recorrerla a ciegas costaba más re-descargas.
+        self.text_limit = max(256, int(text_limit))
+        self.max_page_bytes = max(65_536, int(max_page_bytes))
+        self.allow_private_network = bool(allow_private_network)
+        self._page_cache: tuple[str, str] | None = None
         self._http: httpx.Client | None = None
         self._http_lock = threading.Lock()
         self._browser_lock = threading.Lock()
@@ -483,15 +510,30 @@ class SearchEngine:
                 logger.debug("no se pudo cerrar la página de Playwright")
 
     # -------------------------------------------------------------- extracción
-    def fetch_url(self, url: str, limit: int = _TEXT_LIMIT) -> str:
-        """Descarga un destino público sin seguir redirecciones y con tope de bytes.
+    def fetch_url(self, url: str, limit: int | None = None, *, start: int = 0) -> str:
+        """Texto visible de un destino, en ventanas, sin seguir redirecciones y con tope de bytes.
 
-        Los fallos de transporte y de estado se convierten en errores del proyecto:
-        el llamador (y el modelo) reciben una explicación accionable, no un trazado
-        de `httpx` con la URL o la cabecera dentro.
+        Los fallos de transporte y de estado se convierten en errores del proyecto: el
+        llamador (y el modelo) reciben una explicación accionable, no un trazado de `httpx`
+        con la URL dentro. La página leída queda en un cache de una entrada, así que pedir
+        la ventana siguiente no vuelve a descargar nada.
         """
         self.panic.check()
-        validate_public_url(url)
+        text = self._page_text(url)
+        window = self.text_limit if limit is None else max(256, int(limit))
+        return _slice_window(text, start=max(0, int(start)), limit=window)
+
+    def _page_text(self, url: str) -> str:
+        """Página completa ya extraída (o descargada ahora), con la política de egreso aplicada."""
+        validate_public_url(url, allow_private=self.allow_private_network)
+        cached = self._page_cache
+        if cached is not None and cached[0] == url:
+            return cached[1]
+        text = self._download_visible_text(url)
+        self._page_cache = (url, text)
+        return text
+
+    def _download_visible_text(self, url: str) -> str:
         client = self._ensure_client()
         try:
             # `follow_redirects=False` también por petición: un cliente compartido mal
@@ -524,12 +566,14 @@ class SearchEngine:
                 for chunk in response.iter_bytes(chunk_size=8192):
                     self.panic.check()
                     body.extend(chunk)
-                    if len(body) > _MAX_PAGE_BYTES:
+                    if len(body) > self.max_page_bytes:
                         raise NetworkPolicyError(
-                            f"Página demasiado grande (máximo {_MAX_PAGE_BYTES} bytes)",
-                            context={"limit": _MAX_PAGE_BYTES},
+                            f"Página demasiado grande (máximo {self.max_page_bytes} bytes)",
+                            context={"limit": self.max_page_bytes},
                         )
-                return visible_text(body.decode(response.encoding or "utf-8", errors="replace"), limit=limit)
+                return visible_text(
+                    body.decode(response.encoding or "utf-8", errors="replace"), limit=self.max_page_bytes
+                )
         except AutonomaError:
             raise
         except (PanicError, KeyboardInterrupt):
@@ -543,7 +587,7 @@ class SearchEngine:
 
     def _fetch_or_error(self, url: str, limit: int) -> str:
         try:
-            return self.fetch_url(url, limit)
+            return self.fetch_url(url, limit if limit > 0 else None)
         except PanicError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -571,9 +615,9 @@ class SearchEngine:
             return results
         workers = min(self.max_parallel_fetches, len(urls))
         if workers == 1:
-            return {url: self._fetch_or_error(url, _TEXT_LIMIT) for url in urls}
+            return {url: self._fetch_or_error(url, self.text_limit) for url in urls}
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="autonoma-fetch") as pool:
-            futures = {pool.submit(self.fetch_url, url, _TEXT_LIMIT): url for url in urls}
+            futures = {pool.submit(self.fetch_url, url, self.text_limit): url for url in urls}
             for future, url in futures.items():
                 try:
                     results[url] = future.result()

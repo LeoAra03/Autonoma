@@ -17,12 +17,14 @@ def test_controls_are_visible_not_executed():
 
 
 def test_diff_preview(tmp_path):
-    path = tmp_path/"note"
+    path = tmp_path / "note"
     path.write_text("old\n", encoding="utf-8")
     preview = operation_preview("write_file", {"path": str(path), "content": "new\n"})
     assert "-old" in preview and "+new" in preview
     assert path.read_text() == "old\n"
-    assert "parcial" in operation_preview("write_file", {"path": str(path), "content": "\n".join(str(i) for i in range(200))})
+    assert "parcial" in operation_preview(
+        "write_file", {"path": str(path), "content": "\n".join(str(i) for i in range(200))}
+    )
     assert "PRIVACIDAD" in operation_preview("read_file", {})
     assert "DESTRUCTIVO" in operation_preview("delete_path", {})
     assert "ALTO RIESGO" in operation_preview("run_command", {})
@@ -75,8 +77,10 @@ def test_cli_success_and_error_codes():
 def test_cli_maps_typed_errors_to_exit_codes():
     session = _bare_session()
     session.agent = SimpleNamespace(notrack=SimpleNamespace(configured=True))
+
     def provider_fail(*a, **k):
         raise ProviderUnavailableError("No se pudo conectar con NoTrack")
+
     session.agent.run = provider_fail
     assert session.run_prompt("hola") == int(ExitCode.PROVIDER)
     session.agent.run = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("secreto-privado"))

@@ -41,9 +41,7 @@ DEFAULT_NOTRACK_BASE_URL: Final[str] = "https://api.notrack.ai/v1"
 DEFAULT_NOTRACK_MODEL: Final[str] = "notrack-uncensored"
 
 _MAX_DOTENV_CHARS: Final[int] = 262_144
-_VALID_KEY_CHARS: Final[frozenset[str]] = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
-)
+_VALID_KEY_CHARS: Final[frozenset[str]] = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 _DOTENV_FORBIDDEN_VALUE_CHARS: Final[str] = "\r\n\x00"
 _MIN_SECRET_SCAN_LENGTH: Final[int] = 6
 
@@ -113,11 +111,19 @@ class NumericBound:
 
 
 NUMERIC_BOUNDS: Final[tuple[NumericBound, ...]] = (
-    NumericBound("max_tool_iterations", "int", 1, 50, 14),
+    # Los techos son generosos porque el coste de un paso de más es tiempo y no seguridad:
+    # la frontera real sigue siendo la aprobación humana de cada operación local.
+    NumericBound("max_tool_iterations", "int", 1, 200, 24),
+    NumericBound("max_tool_calls_per_turn", "int", 1, 32, 16),
+    NumericBound("max_parallel_tool_calls", "int", 1, 8, 4),
+    NumericBound("max_history_messages", "int", 2, 512, 64),
     NumericBound("http_timeout", "float", 1, 300, 120.0),
-    NumericBound("command_timeout", "float", 1, 300, 60.0),
+    NumericBound("command_timeout", "float", 1, 1800, 120.0),
     NumericBound("search_results", "int", 1, 20, 5),
     NumericBound("fetch_pages", "int", 0, 5, 3),
+    NumericBound("fetch_char_limit", "int", 1_000, 200_000, 12_000),
+    NumericBound("page_max_bytes", "int", 100_000, 16_000_000, 4_000_000),
+    NumericBound("read_limit_chars", "int", 1_000, 400_000, 80_000),
 )
 
 
@@ -126,12 +132,22 @@ class Settings:
     """Ajustes runtime del agente. Inmutables: usar `replace()` o los helpers."""
 
     allow_commands: bool = False
+    session_persist: bool = True
+    allow_private_network: bool = False
     notrack_api_key: str = ""
     notrack_base_url: str = DEFAULT_NOTRACK_BASE_URL
     notrack_model: str = DEFAULT_NOTRACK_MODEL
     brave_api_key: str = ""
     knowledge_dir: str = ""
-    max_tool_iterations: int = 14
+    sessions_dir: str = ""
+    jobs_dir: str = ""
+    max_tool_iterations: int = 24
+    max_tool_calls_per_turn: int = 16
+    max_parallel_tool_calls: int = 4
+    max_history_messages: int = 64
+    fetch_char_limit: int = 12_000
+    page_max_bytes: int = 4_000_000
+    read_limit_chars: int = 80_000
     http_timeout: float = 120.0
     search_results: int = 5
     fetch_pages: int = 3
@@ -158,9 +174,28 @@ class Settings:
     def log_path(self) -> Path:
         return self._resolve_under_root(self.log_dir, "logs")
 
+    def sessions_path(self) -> Path:
+        return self._resolve_under_root(self.sessions_dir, "sessions")
+
+    def jobs_path(self) -> Path:
+        return self._resolve_under_root(self.jobs_dir, "jobs")
+
+    @property
+    def local_endpoint(self) -> bool:
+        """Base URL en loopback: un modelo propio (Ollama, LM Studio) no necesita clave."""
+        from urllib.parse import urlsplit  # local: evitar importar la red en la carga del módulo
+
+        host = (urlsplit(self.notrack_base_url).hostname or "").lower()
+        return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "::"} or host.endswith(".localhost")
+
     @property
     def has_notrack_key(self) -> bool:
         return bool(self.notrack_api_key.strip())
+
+    @property
+    def can_talk_to_model(self) -> bool:
+        """Se puede hablar con el modelo: con clave, o con un endpoint local que no la pide."""
+        return self.has_notrack_key or self.local_endpoint
 
     @property
     def has_brave_key(self) -> bool:
@@ -190,8 +225,11 @@ class Settings:
         return replace(self, root_dir=root)
 
     def ensure_directories(self) -> Settings:
-        """Crea `knowledge_base/` y `logs/`, o explica por qué no se pudo."""
-        for label, path in (("knowledge_base", self.knowledge_path()), ("logs", self.log_path())):
+        """Crea las carpetas locales (`knowledge_base/`, `logs/`, `sessions/`)."""
+        pairs: list[tuple[str, Path]] = [("knowledge_base", self.knowledge_path()), ("logs", self.log_path())]
+        if self.session_persist:
+            pairs.append(("sessions", self.sessions_path()))
+        for label, path in pairs:
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
@@ -297,6 +335,19 @@ def load_json_config(path: Path) -> Mapping[str, Any]:
     return {str(key): value for key, value in parsed.items()}
 
 
+def _as_bool(raw: str) -> bool:
+    """Booleanos sin sorpresas: sólo las formas habituales de sí/no, y nada más."""
+    text = (raw or "").strip().lower()
+    if text in {"1", "true", "yes", "si", "sí", "on", "y"}:
+        return True
+    if text in {"", "0", "false", "no", "off", "n"}:
+        return False
+    raise ConfigurationError(
+        f"Configuración inválida: se esperaba un booleano, llegó {raw!r}",
+        context={"received": raw.strip()[:40]},
+    )
+
+
 def _normalize_json_value(raw: Any) -> str:
     if isinstance(raw, str):
         return raw
@@ -332,8 +383,8 @@ def load_settings(
     `/key`) sin mutar `os.environ`: el estado global deja de ser un canal oculto
     entre la UI y la carga de ajustes.
     """
-    root = _coerce_data_root(data_root) if data_root is not None else resolve_data_root(
-        os.environ if env is None else env
+    root = (
+        _coerce_data_root(data_root) if data_root is not None else resolve_data_root(os.environ if env is None else env)
     )
     base_dir = root.path
     dotenv = read_dotenv_file(env_path or base_dir / ".env")
@@ -362,7 +413,17 @@ def load_settings(
         brave_api_key=pick("BRAVE_API_KEY", "brave_api_key"),
         knowledge_dir=pick("KNOWLEDGE_DIR", "knowledge_dir"),
         log_dir=pick("LOG_DIR", "log_dir"),
+        sessions_dir=pick("SESSIONS_DIR", "sessions_dir"),
+        jobs_dir=pick("JOBS_DIR", "jobs_dir"),
         max_tool_iterations=int(numerics["max_tool_iterations"]),
+        max_tool_calls_per_turn=int(numerics["max_tool_calls_per_turn"]),
+        max_parallel_tool_calls=int(numerics["max_parallel_tool_calls"]),
+        max_history_messages=int(numerics["max_history_messages"]),
+        fetch_char_limit=int(numerics["fetch_char_limit"]),
+        page_max_bytes=int(numerics["page_max_bytes"]),
+        read_limit_chars=int(numerics["read_limit_chars"]),
+        session_persist=_as_bool(pick("SESSION_PERSIST", "session_persist", "true")),
+        allow_private_network=_as_bool(pick("ALLOW_PRIVATE_NETWORK", "allow_private_network", "false")),
         http_timeout=float(numerics["http_timeout"]),
         command_timeout=float(numerics["command_timeout"]),
         search_results=int(numerics["search_results"]),
@@ -374,7 +435,9 @@ def load_settings(
     return settings.ensure_directories() if ensure_dirs else settings
 
 
-def context_for(settings: Settings, render: RenderPreferences | None = None, *, env: Mapping[str, str] | None = None) -> RuntimeContext:
+def context_for(
+    settings: Settings, render: RenderPreferences | None = None, *, env: Mapping[str, str] | None = None
+) -> RuntimeContext:
     """Contexto de ejecución coherente con unos ajustes ya cargados."""
     root = (
         DataRoot(path=settings.root, origin=DataOrigin.FLAG)
@@ -418,4 +481,6 @@ def dump_public_config(settings: Settings) -> dict[str, Any]:
     data["root_dir"] = str(settings.root)
     data["knowledge_dir_resolved"] = str(settings.knowledge_path())
     data["log_dir_resolved"] = str(settings.log_path())
+    data["sessions_dir_resolved"] = str(settings.sessions_path())
+    data["local_endpoint"] = settings.local_endpoint
     return data

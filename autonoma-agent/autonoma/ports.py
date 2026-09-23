@@ -22,6 +22,7 @@ __all__ = [
     "EventKind",
     "EventSink",
     "FileSystemPort",
+    "JobsPort",
     "NotesPort",
     "ResourcePort",
     "SearchPort",
@@ -96,9 +97,27 @@ class SearchPort(Protocol):
 
     def format_bundle(self, bundle: Any, preview: int = 900) -> str: ...
 
-    def fetch_url(self, url: str, limit: int = 12_000) -> str: ...
+    def fetch_url(self, url: str, limit: int | None = None, *, start: int = 0) -> str: ...
 
     def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class JobsPort(Protocol):
+    """Trabajos en segundo plano: lanzar, inspeccionar, matar. La salida es texto, no un pipe."""
+
+    @property
+    def active_count(self) -> int: ...
+
+    def spawn(self, command: str, cwd: str | None = None) -> Any: ...
+
+    def status(self, job_id: str | None = None) -> str: ...
+
+    def output(self, job_id: str | None = None, max_chars: int | None = None, *, tail: bool = True) -> str: ...
+
+    def kill(self, job_id: str) -> str: ...
+
+    def close(self) -> None: ...
 
 
 @runtime_checkable
@@ -114,7 +133,26 @@ class ConsolePort(Protocol):
 class FileSystemPort(Protocol):
     """Operaciones locales que requieren aprobación humana explícita."""
 
-    def read_file(self, path: str, max_chars: int = DEFAULT_MAX_READ_CHARS) -> str: ...
+    def read_file(
+        self,
+        path: str,
+        max_chars: int | None = None,
+        *,
+        start_line: int = 1,
+        max_lines: int = 0,
+    ) -> str: ...
+
+    def edit_file(self, path: str, find: str, replace: str, *, all: bool = False, force: bool = False) -> str: ...
+
+    def search_files(
+        self,
+        pattern: str,
+        path: str = ".",
+        glob: str = "**/*",
+        max_results: int = 40,
+        *,
+        ignore_case: bool = True,
+    ) -> str: ...
 
     def write_file(self, path: str, content: str, *, force: bool = False) -> str: ...
 

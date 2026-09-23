@@ -68,7 +68,16 @@ def test_resolution_never_touches_the_process_environment(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("1", True), ("true", True), ("YES", True), ("on", True), ("0", False), ("false", False), ("no", False), ("off", False)],
+    [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+    ],
 )
 def test_env_flags_use_a_whitelist_of_falsy_values(raw: str, expected: bool) -> None:
     """Cualquier texto distinto de los falsy explícitos enciende la preferencia."""
@@ -180,3 +189,20 @@ def test_busy_flag_tracks_work_in_progress() -> None:
     assert panic.busy is True
     panic.mark_idle()
     assert panic.busy is False
+
+
+def test_session_and_job_directories_follow_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poder mover la memoria de sitio es tan importante como poder apagarla.
+
+    El patrón es el de `LOG_DIR`/`KNOWLEDGE_DIR`: una variable de entorno y su clave
+    equivalente en `config.json`, resueltas siempre bajo la raíz de datos si son relativas.
+    """
+    from autonoma.config import load_settings
+
+    monkeypatch.setenv("SESSIONS_DIR", "mi-historial")
+    monkeypatch.setenv("JOBS_DIR", str(tmp_path / "trabajos"))
+    monkeypatch.setenv("KNOWLEDGE_DIR", "notas")
+    settings = load_settings(overrides={}, data_root=DataRoot(tmp_path, DataOrigin.FLAG))
+    assert settings.sessions_path() == tmp_path / "mi-historial"
+    assert settings.jobs_path() == tmp_path / "trabajos"
+    assert settings.knowledge_path() == tmp_path / "notas"

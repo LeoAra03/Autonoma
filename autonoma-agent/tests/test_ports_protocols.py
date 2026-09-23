@@ -19,11 +19,7 @@ from autonoma.search_engine import SearchEngine
 
 
 def protocol_members(protocol: type[object]) -> list[str]:
-    return sorted(
-        name
-        for name, member in vars(protocol).items()
-        if not name.startswith("__") and callable(member)
-    )
+    return sorted(name for name, member in vars(protocol).items() if not name.startswith("__") and callable(member))
 
 
 def test_search_engine_satisfies_search_port(tmp_path: Path) -> None:

@@ -29,12 +29,7 @@ _SHELL_LABELS: Final[Mapping[str, str]] = {"nt": "cmd.exe", "posix": "POSIX"}
 
 def safe_text(value: str) -> str:
     """Representa controles (ESC, Bidi, BEL…) sin ejecutarlos en la terminal."""
-    return "".join(
-        f"\\u{ord(char):04x}"
-        if _is_control_char(char)
-        else char
-        for char in value
-    )
+    return "".join(f"\\u{ord(char):04x}" if _is_control_char(char) else char for char in value)
 
 
 def _is_control_char(char: str) -> bool:

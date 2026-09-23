@@ -146,3 +146,32 @@ def test_selftest_text_mode_is_human_readable(tmp_path: Path, capsys: pytest.Cap
     output = capsys.readouterr().out
     assert "autonoma" in output.lower()
     assert "Traceback" not in output
+
+
+def test_doctor_recognises_a_local_model_without_a_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un servidor en loopback no necesita clave: decir "falta clave" sería mentir."""
+    monkeypatch.delenv("NOTRACK_API_KEY", raising=False)
+    monkeypatch.setenv("NOTRACK_BASE_URL", "http://127.0.0.1:11434/v1")
+    report = collect_diagnostics(data_root=tmp_path)
+    key = next(check for check in report.checks if check.name == "notrack_key")
+    assert key.status is CheckStatus.OK
+    assert "loopback" in key.message
+    assert report.local_checks_passed is True
+
+
+def test_doctor_shows_the_memory_and_limits_of_the_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SESSION_PERSIST", "false")
+    monkeypatch.setenv("ALLOW_PRIVATE_NETWORK", "true")
+    monkeypatch.setenv("MAX_TOOL_ITERATIONS", "40")
+    by_name = {check.name: check for check in collect_diagnostics(data_root=tmp_path).checks}
+    assert by_name["memory"].status is CheckStatus.WARNING
+    assert "apagado" in by_name["memory"].message
+    assert "sessions_directory" not in by_name  # nada que escribir, nada que comprobar
+    assert by_name["network_policy"].status is CheckStatus.WARNING
+    assert "red local" in by_name["network_policy"].message
+    assert "40 iteraciones" in by_name["limits"].message
+
+
+def test_doctor_lists_the_directories_it_needs(tmp_path: Path) -> None:
+    names = {check.name for check in collect_diagnostics(data_root=tmp_path).checks}
+    assert {"data_directory", "knowledge_directory", "log_directory", "jobs_directory"} <= names

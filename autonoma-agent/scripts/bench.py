@@ -128,6 +128,7 @@ def bench_fetch_fanout(tmp: Path) -> dict[str, float]:
 
     engine = SearchEngine(PanicController(), tmp / "pipe", fetch_pages=PAGES)
     engine._http = httpx.Client(transport=httpx.MockTransport(handle))  # noqa: SLF001 — banco de pruebas
+
     def stub_search(_query: str, _count: int | None = None) -> tuple[SearchHit, ...]:
         return hits  # se mide la descarga concurrente, no la búsqueda
 

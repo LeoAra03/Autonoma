@@ -31,16 +31,37 @@ __all__ = [
     "validate_arguments",
 ]
 
-_MAX_ARGUMENTS_CHARS: Final[int] = 100_000
-_MAX_CONTENT_CHARS: Final[int] = 80_000
+# Capaces amplios a propósito: un agente que no puede escribir el archivo entero que ya
+# leyó no automatiza nada, sólo da instrucciones. El límite existe para el agotamiento
+# de memoria y para que un JSON degenerado no se trague el proceso, no para incomodar.
+_MAX_ARGUMENTS_CHARS: Final[int] = 600_000
+_MAX_CONTENT_CHARS: Final[int] = 400_000
 _MAX_SCALAR_CHARS: Final[int] = 4_096
 _FORBIDDEN_CHARS: Final[str] = "\x00"
-_BLANK_FORBIDDEN_KEYS: Final[frozenset[str]] = frozenset({"path", "src", "dst", "query", "title", "command", "url"})
+# `replace` sí puede ser vacío: borrar un trozo es una operación legítima.
+_BLANK_FORBIDDEN_KEYS: Final[frozenset[str]] = frozenset(
+    {"path", "src", "dst", "query", "title", "command", "url", "find", "pattern"}
+)
 
 FieldType = Literal["string", "integer", "number", "boolean"]
 
+#: Todo lo que toca el disco o lanza procesos pasa por la aprobación humana explícita.
 LOCAL_TOOLS: Final[frozenset[str]] = frozenset(
-    {"read_file", "write_file", "copy_path", "move_path", "delete_path", "list_dir", "mkdir", "run_command"}
+    {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "append_file",
+        "search_files",
+        "copy_path",
+        "move_path",
+        "delete_path",
+        "list_dir",
+        "mkdir",
+        "run_command",
+        "spawn_command",
+        "kill_job",
+    }
 )
 
 
@@ -167,10 +188,14 @@ class ToolSpec:
         index = self.by_field
         unknown = sorted(set(args) - set(index))
         if unknown:
-            raise ToolValidationError("Parámetros desconocidos", context={"tool": self.name, "unknown": ",".join(unknown)})
+            raise ToolValidationError(
+                "Parámetros desconocidos", context={"tool": self.name, "unknown": ",".join(unknown)}
+            )
         missing = sorted(set(self.required) - set(args))
         if missing:
-            raise ToolValidationError("Faltan parámetros obligatorios", context={"tool": self.name, "missing": ",".join(missing)})
+            raise ToolValidationError(
+                "Faltan parámetros obligatorios", context={"tool": self.name, "missing": ",".join(missing)}
+            )
         clean: dict[str, Any] = {}
         for key, value in args.items():
             field = index[key]
@@ -194,7 +219,10 @@ def _fields_index(fields: tuple[ToolField, ...]) -> Mapping[str, ToolField]:
     return cached
 
 
-_TIMEOUT = _number("timeout", "Segundos máximos", 0.01, 300.0, integer=False)
+_TIMEOUT = _number("timeout", "Segundos máximos", 0.01, 1800.0, integer=False)
+_READ_CHARS = _number("max_chars", "Carácteres como máximo", 200, 400_000)
+_START_LINE = _number("start_line", "Primera línea a devolver (1-based)", 1, 1_000_000)
+_MAX_LINES = _number("max_lines", "Líneas a devolver (0 = corte por caracteres)", 0, 4000)
 
 TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
     ToolSpec(
@@ -205,14 +233,37 @@ TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
             _number("fetch_pages", "Cuántas páginas extraer (0-5). Por defecto 3.", 0, 5),
         ),
     ),
-    ToolSpec(name="fetch_url", description="Descarga y extrae el texto visible de una URL concreta.",
-             fields=(_string("url"),)),
-    ToolSpec(name="save_knowledge", description="Guarda una nota en ./knowledge_base/ como Markdown.",
-             fields=(_string("title"), _string("content", max_length=_MAX_CONTENT_CHARS))),
-    ToolSpec(name="read_knowledge", description="Lee o busca notas ya guardadas en knowledge_base.",
-             fields=(_string("query", "Nombre de archivo o texto a buscar"),)),
+    ToolSpec(
+        name="fetch_url",
+        description=(
+            "Descarga y extrae el texto visible de una URL. Con start_char/max_chars se recorre "
+            "página a página sin volver a descargarla, y con save=true queda como nota."
+        ),
+        fields=(
+            _string("url"),
+            _number("max_chars", "Caracteres a devolver (por defecto 16000)", 500, 200_000),
+            _number("start_char", "Desplazamiento inicial dentro del texto extraído", 0, 20_000_000),
+            _flag("save", "Guardar el texto extraído como nota en knowledge_base"),
+            _string("title", "Título de la nota cuando save=true", required=False),
+        ),
+    ),
+    ToolSpec(
+        name="save_knowledge",
+        description="Guarda una nota en ./knowledge_base/ como Markdown.",
+        fields=(_string("title"), _string("content", max_length=_MAX_CONTENT_CHARS)),
+    ),
+    ToolSpec(
+        name="read_knowledge",
+        description="Lee o busca notas ya guardadas en knowledge_base.",
+        fields=(_string("query", "Nombre de archivo o texto a buscar"),),
+    ),
     ToolSpec(name="list_knowledge", description="Lista las notas recientes de knowledge_base.", fields=()),
-    ToolSpec(name="read_file", description="Lee un archivo de texto del disco.", fields=(_string("path"),), local=True),
+    ToolSpec(
+        name="read_file",
+        description="Lee un archivo de texto del disco. Con start_line/max_lines se recorre en ventanas.",
+        fields=(_string("path"), _READ_CHARS, _START_LINE, _MAX_LINES),
+        local=True,
+    ),
     ToolSpec(
         name="write_file",
         description="Crea o sobrescribe un archivo de texto. Crea directorios padre si hace falta.",
@@ -223,14 +274,91 @@ TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
         ),
         local=True,
     ),
-    ToolSpec(name="copy_path", description="Copia un archivo o carpeta.",
-             fields=(_string("src"), _string("dst"), _flag("force", "")), local=True),
-    ToolSpec(name="move_path", description="Mueve o renombra un archivo o carpeta.",
-             fields=(_string("src"), _string("dst"), _flag("force", "")), local=True),
-    ToolSpec(name="delete_path", description="Elimina un archivo o carpeta. Siempre bloqueado en rutas críticas del SO.",
-             fields=(_string("path"), _flag("force", "")), local=True),
-    ToolSpec(name="list_dir", description="Lista el contenido de un directorio.", fields=(_string("path"),), local=True),
+    ToolSpec(
+        name="edit_file",
+        description=(
+            "Sustituye un fragmento exacto de un archivo de texto sin reescribirlo entero. "
+            "Si el trozo aparece más de una vez hay que decir all=true o añadir contexto: "
+            "nunca se adivina."
+        ),
+        fields=(
+            _string("path"),
+            _string("find", "Texto literal a buscar, copiado tal cual del archivo", max_length=_MAX_CONTENT_CHARS),
+            _string("replace", "Texto que lo sustituye (vacío = borrar el fragmento)", max_length=_MAX_CONTENT_CHARS),
+            _flag("all", "Reemplazar todas las coincidencias en lugar de exigir unicidad"),
+        ),
+        local=True,
+    ),
+    ToolSpec(
+        name="append_file",
+        description="Anexa texto al final de un archivo; lo crea si no existe.",
+        fields=(_string("path"), _string("content", max_length=_MAX_CONTENT_CHARS)),
+        local=True,
+    ),
+    ToolSpec(
+        name="search_files",
+        description="Busca una expresión regular en un árbol: devuelve ruta:línea: texto. Salta binarios y artefactos.",
+        fields=(
+            _string("pattern", "Expresión regular (re.search por línea)", max_length=1_024),
+            _string("path", "Raíz donde buscar; por defecto el directorio actual", required=False),
+            _string("glob", "Filtro de rutas relativas, p. ej. **/*.py", required=False, max_length=256),
+            _number("max_results", "Coincidencias máximas (1-200)", 1, 200),
+            _flag("ignore_case", "Ignorar mayúsculas (por defecto sí)"),
+        ),
+        local=True,
+    ),
+    ToolSpec(
+        name="copy_path",
+        description="Copia un archivo o carpeta.",
+        fields=(_string("src"), _string("dst"), _flag("force", "")),
+        local=True,
+    ),
+    ToolSpec(
+        name="move_path",
+        description="Mueve o renombra un archivo o carpeta.",
+        fields=(_string("src"), _string("dst"), _flag("force", "")),
+        local=True,
+    ),
+    ToolSpec(
+        name="delete_path",
+        description="Elimina un archivo o carpeta. Siempre bloqueado en rutas críticas del SO.",
+        fields=(_string("path"), _flag("force", "")),
+        local=True,
+    ),
+    ToolSpec(
+        name="list_dir", description="Lista el contenido de un directorio.", fields=(_string("path"),), local=True
+    ),
     ToolSpec(name="mkdir", description="Crea un directorio (y padres).", fields=(_string("path"),), local=True),
+    ToolSpec(
+        name="spawn_command",
+        description=(
+            "Lanza un comando en segundo plano y responde al instante con un id de trabajo. "
+            "La salida se acumula en un archivo legible con job_output; el proceso sobrevive al "
+            "turno, no a la sesión."
+        ),
+        fields=(_string("command"), _string("cwd", "Directorio de trabajo opcional", required=False)),
+        local=True,
+    ),
+    ToolSpec(
+        name="job_status",
+        description="Estado de los trabajos en segundo plano (o de uno, si das job_id).",
+        fields=(_string("job_id", "Identificador devuelto por spawn_command", required=False),),
+    ),
+    ToolSpec(
+        name="job_output",
+        description="Texto del log de un trabajo: cola por defecto; tail=false para leer desde el principio.",
+        fields=(
+            _string("job_id", required=False),
+            _number("max_chars", "Caracteres a devolver", 200, 200_000),
+            _flag("tail", "Leer el final en lugar del principio (por defecto sí)"),
+        ),
+    ),
+    ToolSpec(
+        name="kill_job",
+        description="Mata un trabajo en segundo plano y su árbol de procesos.",
+        fields=(_string("job_id"), _flag("confirm", "Debe ser true; evita matar el trabajo equivocado")),
+        local=True,
+    ),
     ToolSpec(
         name="run_command",
         description="Ejecuta un programa o comando de shell en la máquina local y devuelve stdout/stderr.",

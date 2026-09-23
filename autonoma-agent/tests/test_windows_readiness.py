@@ -14,15 +14,36 @@ from autonoma.key_handler import PanicController
 from autonoma.path_policy import has_redirected_component, is_redirected, validate_windows_path
 
 
-@pytest.mark.parametrize("raw", [r"C:relative.txt", r"C:\file.txt:secret", r"\\.\PhysicalDrive0",
-    r"\\?\C:\file", r"C:\CON", r"C:\AUX.txt", r"C:\NUL", r"C:\folder.\file", r"C:\folder \file", r"C:\CON\file", r"\Windows\file"])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r"C:relative.txt",
+        r"C:\file.txt:secret",
+        r"\\.\PhysicalDrive0",
+        r"\\?\C:\file",
+        r"C:\CON",
+        r"C:\AUX.txt",
+        r"C:\NUL",
+        r"C:\folder.\file",
+        r"C:\folder \file",
+        r"C:\CON\file",
+        r"\Windows\file",
+    ],
+)
 def test_invalid_windows_paths(raw):
     with pytest.raises(ValueError):
         validate_windows_path(raw)
 
 
-@pytest.mark.parametrize("raw", [r"C:\Users\Persona\file.txt", r"C:\carpeta con espacios\nota.md",
-    r"notas\hola.txt", r"\\servidor\recurso\nota.txt"])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r"C:\Users\Persona\file.txt",
+        r"C:\carpeta con espacios\nota.md",
+        r"notas\hola.txt",
+        r"\\servidor\recurso\nota.txt",
+    ],
+)
 def test_normal_windows_paths(raw):
     validate_windows_path(raw)
 
@@ -36,34 +57,36 @@ def test_reparse_point_without_symlink_mode():
 
 
 def test_missing_and_inaccessible_path(tmp_path):
-    assert not is_redirected(tmp_path/"missing")
+    assert not is_redirected(tmp_path / "missing")
+
     def denied():
         raise PermissionError("denied")
+
     with pytest.raises(PermissionError):
         is_redirected(SimpleNamespace(lstat=denied))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Requiere NTFS/Windows real")
 def test_native_windows_junction(tmp_path):
-    target = tmp_path/"target"
+    target = tmp_path / "target"
     target.mkdir()
-    (target/"keep.txt").write_text("original")
-    junction = tmp_path/"junction"
-    cmd = str(Path(os.environ["SYSTEMROOT"])/"System32"/"cmd.exe")
-    subprocess.run([cmd, "/c", "mklink", "/J", str(junction), str(target)], check=True,
-                   capture_output=True, timeout=10)
+    (target / "keep.txt").write_text("original")
+    junction = tmp_path / "junction"
+    cmd = str(Path(os.environ["SYSTEMROOT"]) / "System32" / "cmd.exe")
+    subprocess.run([cmd, "/c", "mklink", "/J", str(junction), str(target)], check=True, capture_output=True, timeout=10)
     assert is_redirected(junction)
-    assert has_redirected_component(junction/"keep.txt")
+    assert has_redirected_component(junction / "keep.txt")
     fs = FileSystemManager(PanicController())
     with pytest.raises(FileSystemError):
-        fs.write_file(str(junction/"keep.txt"), "changed")
-    assert (target/"keep.txt").read_text() == "original"
+        fs.write_file(str(junction / "keep.txt"), "changed")
+    assert (target / "keep.txt").read_text() == "original"
 
 
 @pytest.fixture
 def offline_settings(tmp_path, monkeypatch):
-    settings = Settings(notrack_api_key="do-not-display-this-secret",
-                        knowledge_dir=str(tmp_path/"kb"), log_dir=str(tmp_path/"logs"))
+    settings = Settings(
+        notrack_api_key="do-not-display-this-secret", knowledge_dir=str(tmp_path / "kb"), log_dir=str(tmp_path / "logs")
+    )
     monkeypatch.setattr(diagnostics, "load_settings", lambda: settings)
     monkeypatch.setattr(diagnostics, "project_root", lambda: tmp_path)
     monkeypatch.setattr(diagnostics, "is_elevated", lambda: False)
@@ -82,7 +105,12 @@ def test_doctor_does_not_disclose_secrets(offline_settings, capsys):
 
 def test_doctor_bad_url_redacted(offline_settings, monkeypatch, capsys):
     from dataclasses import replace
-    monkeypatch.setattr(diagnostics, "load_settings", lambda: replace(offline_settings, notrack_base_url="https://user:secret@example.com"))
+
+    monkeypatch.setattr(
+        diagnostics,
+        "load_settings",
+        lambda: replace(offline_settings, notrack_base_url="https://user:secret@example.com"),
+    )
     assert diagnostics.run_diagnostics() == 1
     raw = capsys.readouterr().out
     assert "secret" not in raw and "ERROR" in raw
@@ -91,6 +119,7 @@ def test_doctor_bad_url_redacted(offline_settings, monkeypatch, capsys):
 def test_doctor_invalid_config(monkeypatch, capsys):
     def fail():
         raise ValueError("private-secret")
+
     monkeypatch.setattr(diagnostics, "load_settings", fail)
     assert diagnostics.run_diagnostics(as_json=True) == 1
     assert "private-secret" not in capsys.readouterr().out
@@ -104,12 +133,14 @@ def test_doctor_unwritable(offline_settings, monkeypatch):
 def test_writable_probe_no_leftover(tmp_path):
     assert diagnostics.writable_directory(tmp_path)
     assert list(tmp_path.iterdir()) == []
-    file = tmp_path/"not-a-directory"
+    file = tmp_path / "not-a-directory"
     file.write_text("keep")
     assert not diagnostics.writable_directory(file)
 
 
-@pytest.mark.parametrize("args", [["--json"], ["--doctor", "prompt"], ["--doctor", "--allow-commands"], ["--doctor", "--global-hotkey"]])
+@pytest.mark.parametrize(
+    "args", [["--json"], ["--doctor", "prompt"], ["--doctor", "--allow-commands"], ["--doctor", "--global-hotkey"]]
+)
 def test_doctor_rejects_ambiguous_cli(args):
     with pytest.raises(SystemExit) as exc:
         cli.parse_args(args)

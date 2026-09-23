@@ -46,8 +46,14 @@ class PublicTarget:
         }
 
 
-def validate_public_url(url: str) -> PublicTarget:
-    """Rechaza destinos no HTTP(S), con credenciales, puertos sueltos o privados."""
+def validate_public_url(url: str, *, allow_private: bool = False) -> PublicTarget:
+    """Rechaza destinos no HTTP(S), con credenciales, puertos sueltos o privados.
+
+    `allow_private` es la única forma de abrir la red local (servidores de desarrollo,
+    APIs internas, `localhost`): opt-in explícito del usuario, no un favor al modelo.
+    Con él activado también se admiten puertos arbitrarios, porque un servicio local
+    casi nunca escucha en 80/443.
+    """
     try:
         parsed = urlsplit(url)
     except ValueError as exc:
@@ -61,7 +67,7 @@ def validate_public_url(url: str) -> PublicTarget:
         port = parsed.port
     except ValueError as exc:
         raise NetworkPolicyError("Puerto inválido en la URL") from exc
-    if port not in _ALLOWED_PORTS[scheme]:
+    if port not in _ALLOWED_PORTS[scheme] and not allow_private:
         raise NetworkPolicyError(
             "Puerto no permitido para este esquema",
             context={"scheme": scheme, "port": str(port)},
@@ -75,7 +81,7 @@ def validate_public_url(url: str) -> PublicTarget:
     if not addresses:
         raise NetworkPolicyError("El destino no resolvió ninguna dirección")
     private = tuple(address for address in addresses if not _is_global(address))
-    if private:
+    if private and not allow_private:
         # No se enumera el host completo en el mensaje: basta con saber que es local.
         raise NetworkPolicyError(
             "Destino de red privado o reservado bloqueado",

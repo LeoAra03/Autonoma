@@ -27,6 +27,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import re
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -44,6 +45,9 @@ PYTHON_DOWNLOAD = "https://www.python.org/downloads/"
 DEV_EXTRAS = ("test", "check")  # `test`/`lint`/`types`/`bench` las necesitan; `run` no
 STAMP_NAME = "autonoma-install.json"
 WINDOWS_LAUNCHER = ("py.exe", "py")
+RELEASES_URL = "https://github.com/LeoAra03/Autonoma/releases/latest"
+UPDATE_FLAGS = ("--allow-dirty",)
+_UPDATE_LOG_LIMIT = 12
 PYTHON_CANDIDATES = ("python3", "python")
 PROBE = "import sys;v=sys.version_info;print('%%d.%%d.%%d' %% v[:3]);sys.exit(0 if v[:2]>=(%d,%d) else 1)"
 
@@ -540,12 +544,105 @@ def run_status(venv: Path, opts: argparse.Namespace) -> int:  # noqa: ARG001 - f
     return print_status(venv)
 
 
+def _git_argv() -> list[str]:
+    """`git` sólo cuando existe: un bundle portable no lo lleva y no es un fallo del usuario."""
+    found = shutil.which("git")
+    if found is None:
+        raise BootstrapError(
+            "`update` necesita git en el PATH. Si instalaste el ZIP portable, baja el bundle "
+            f"nuevo en {os.environ.get('AUTONOMA_RELEASES_URL', RELEASES_URL)} y reemplaza la carpeta."
+        )
+    return [found]
+
+
+def _git(git: Sequence[str], *args: str, dry_run: bool = False, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
+    return _run([*git, *args], capture=True, dry_run=dry_run, timeout=timeout)
+
+
+def local_version() -> str:
+    """Versión declarada en el paquete, sin importarlo: el `update` corre con Python del sistema.
+
+    `setuptools` lee `_version.py` de forma estática, así que ése es el sitio canónico; el
+    `__init__.py` se mira sólo como respaldo para paquetes antiguos.
+    """
+    text = ""
+    for candidate in (PACKAGE / "autonoma" / "_version.py", PACKAGE / "autonoma" / "__init__.py"):
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "__version__" in text:
+            break
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def _announce_portable_update() -> int:
+    """Un bundle congelado no se reescribe a sí mismo: decir la URL es el camino honesto."""
+    url = os.environ.get("AUTONOMA_RELEASES_URL", RELEASES_URL)
+    say("aviso", f"esta instalación no es un checkout de git (versión {local_version() or 'desconocida'})")
+    print(f"    baja el bundle nuevo en {url}, reemplaza la carpeta y verifica con `Autonoma.exe --selftest`", flush=True)
+    print("    `.env`, `knowledge_base/`, `sessions/` y `logs/` se conservan: viven fuera del bundle", flush=True)
+    return 0
+
+
+def run_update(venv: Path, opts: argparse.Namespace) -> int:
+    """Actualiza el checkout y re-sincroniza el entorno: el `git pull` que no rompe nada.
+
+    Se niega a trabajar con el árbol sucio (es el caso en que un `--ff-only` se lleva puesto
+    el trabajo de alguien) y no finge poder con un bundle congelado: ahí dice qué bajar.
+    """
+    dry = bool(opts.dry_run)
+    say("update", "comprobando si hay una versión nueva…")
+    try:
+        git = _git_argv()
+    except BootstrapError:
+        return _announce_portable_update()
+    inside = _git(git, "rev-parse", "--is-inside-work-tree", dry_run=dry)
+    if inside.returncode != 0 or inside.stdout.strip().lower() != "true":
+        return _announce_portable_update()
+    branch = _git(git, "rev-parse", "--abbrev-ref", "HEAD", dry_run=dry).stdout.strip() or "HEAD"
+    upstream = _git(git, "rev-parse", "--abbrev-ref", "@{u}", dry_run=dry).stdout.strip()
+    target = upstream if upstream and not upstream.startswith("@{u}") else ""
+    if not target:
+        # Sin upstream configurado (rama de trabajo, `git init` + fetch manual): si existe
+        # `origin/<rama>`, ése es el sitio razonable de donde traer cambios.
+        candidate = _git(git, "rev-parse", "--verify", "--quiet", f"origin/{branch}", dry_run=dry)
+        if not dry and (candidate.returncode != 0 or not candidate.stdout.strip()):
+            say("aviso", f"la rama {branch} no tiene remoto de donde traer cambios; no se toca nada")
+            return _announce_portable_update()
+        target = f"origin/{branch}"
+    dirty = _git(git, "status", "--porcelain", dry_run=dry).stdout.strip()
+    if dirty and "--allow-dirty" not in opts.args:
+        raise BootstrapError(
+            "hay cambios locales sin commitear; `update` no los toca. Commitea o guarda antes "
+            "(o pasa --allow-dirty si sabes que puedes perderlos)"
+        )
+    _git(git, "fetch", "--quiet", "--tags", "origin", branch, dry_run=dry, timeout=600.0)
+    behind = _git(git, "rev-list", "--count", f"HEAD..{target}", dry_run=dry).stdout.strip() or "0"
+    head = _git(git, "rev-parse", "--short", "HEAD", dry_run=dry).stdout.strip()
+    if behind == "0":
+        say("ok", f"ya estás al día ({branch} @ {head or 'sin commits'})")
+        return 0
+    before = _git(git, "rev-parse", "HEAD", dry_run=dry).stdout.strip()
+    _git(git, "merge", "--ff-only", "--quiet", target, dry_run=dry, timeout=600.0)
+    incoming = [line for line in _git(git, "log", "--oneline", f"{before}..HEAD", dry_run=dry).stdout.splitlines() if line.strip()]
+    for line in incoming[:_UPDATE_LOG_LIMIT]:
+        print(f"    {line}", flush=True)
+    say("update", "re-sincronizando el entorno con el código nuevo…")
+    setup(venv, dry_run=dry, interactive=False, ensure_env=False)
+    tail = f" y {len(incoming) - _UPDATE_LOG_LIMIT} más" if len(incoming) > _UPDATE_LOG_LIMIT else ""
+    say("ok", f"{len(incoming) or '?'} commit(s) aplicados{tail}; `{head or '…'}` → HEAD nuevo")
+    return 0
+
+
 COMMANDS: Mapping[str, tuple[object, bool]] = {
     "setup": (run_setup, False),
     "run": (run_run, False),
     "key": (run_key, False),
     "status": (run_status, False),
     "clean": (run_clean, False),
+    "update": (run_update, False),
     "doctor": (lambda venv, opts: run_cli_direct(venv, opts, ["--doctor", *opts.args]), False),
     "selftest": (lambda venv, opts: run_cli_direct(venv, opts, ["--selftest", "--json", *opts.args]), False),
     "test": (lambda venv, opts: run_in_venv(venv, opts, "test"), True),

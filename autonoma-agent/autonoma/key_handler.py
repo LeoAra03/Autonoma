@@ -65,7 +65,7 @@ class ListenerStatus:
         reason = (self.reason or "").strip().rstrip(".")
         if not reason:
             return "Listener P: inactivo. Usa Ctrl+C en la terminal."
-        return f"Listener P: inactivo — {reason}."""
+        return f"Listener P: inactivo — {reason}."
 
 
 Cleanups = Callable[[], None]
@@ -219,7 +219,10 @@ class KeyHandler:
             self._listener = listener
             self._started = True
             self._status = ListenerStatus(ListenerState.RUNNING)
-            logger.info("KeyHandler activo", extra={"event": "panic.listener_started", "fields": {"key": self.panic_key.upper()}})
+            logger.info(
+                "KeyHandler activo",
+                extra={"event": "panic.listener_started", "fields": {"key": self.panic_key.upper()}},
+            )
             return self._status
 
     def stop(self) -> None:

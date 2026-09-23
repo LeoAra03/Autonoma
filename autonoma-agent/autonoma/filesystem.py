@@ -30,16 +30,26 @@ from autonoma.errors import FileSystemError, PathPolicyError
 from autonoma.key_handler import PanicController
 from autonoma.path_policy import has_redirected_component, is_redirected, validate_windows_path
 from autonoma.processes import CommandResult, ProcessSupervisor
+from autonoma.text_ops import (
+    DEFAULT_MAX_RESULTS,
+    MAX_SCANNED_BYTES,
+    apply_edit,
+    grep_tree,
+    read_window,
+)
 
-__all__ = ["CommandResult", "FileSystemError", "FileSystemManager", "ProtectedPolicy"]
+__all__ = ["CommandResult", "FileSystemError", "FileSystemManager", "ProtectedPolicy", "atomic_write_text"]
 
 logger = logging.getLogger(__name__)
 
 _READ_DEFAULT_CHARS: Final[int] = 80_000
 _LIST_DEFAULT_ENTRIES: Final[int] = 400
-_TRUNCATION_NOTE: Final[str] = "\n\n…[truncado, más de {limit} caracteres]"
 _PROTECTED_ENV_WINDOWS: Final[tuple[str, ...]] = (
-    "WINDIR", "SYSTEMROOT", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA",
+    "WINDIR",
+    "SYSTEMROOT",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMDATA",
 )
 _UNIX_ROOT: Final[tuple[str, ...]] = ("/",)
 
@@ -70,15 +80,29 @@ def default_protected_roots(env: dict[str, str] | None = None) -> tuple[Path, ..
             Path(r"C:\Boot"),
             Path(r"C:\EFI"),
         ]
-        candidates.extend(
-            extra for name in _PROTECTED_ENV_WINDOWS if (extra := _win_env_path(name, env)) is not None
-        )
+        candidates.extend(extra for name in _PROTECTED_ENV_WINDOWS if (extra := _win_env_path(name, env)) is not None)
     else:
         candidates = [
-            Path("/"), Path("/etc"), Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"),
-            Path("/lib64"), Path("/boot"), Path("/dev"), Path("/proc"), Path("/sys"), Path("/root"),
-            Path("/run"), Path("/snap"), Path("/System"), Path("/Library"), Path("/private/etc"),
-            Path("/private/var"), Path("/Applications"), Path("/usr/local/bin"),
+            Path("/"),
+            Path("/etc"),
+            Path("/usr"),
+            Path("/bin"),
+            Path("/sbin"),
+            Path("/lib"),
+            Path("/lib64"),
+            Path("/boot"),
+            Path("/dev"),
+            Path("/proc"),
+            Path("/sys"),
+            Path("/root"),
+            Path("/run"),
+            Path("/snap"),
+            Path("/System"),
+            Path("/Library"),
+            Path("/private/etc"),
+            Path("/private/var"),
+            Path("/Applications"),
+            Path("/usr/local/bin"),
         ]
     resolved: list[Path] = []
     for candidate in candidates:
@@ -157,8 +181,12 @@ class FileSystemManager:
         command_timeout: float = 60.0,
         *,
         env: dict[str, str] | None = None,
+        read_limit_chars: int = _READ_DEFAULT_CHARS,
     ) -> None:
         self.panic = panic
+        # El tope de lectura es un ajuste, no una constante: 80 000 caracteres dejan fuera
+        # un archivo de configuración grande, y el modelo acaba pidiendo ventanas innecesarias.
+        self._read_limit = max(200, int(read_limit_chars))
         self._protected = ProtectedPolicy.build(
             [*default_protected_roots(env), *(Path(raw).expanduser() for raw in (extra_protected or ()))],
         )
@@ -234,22 +262,98 @@ class FileSystemManager:
             raise FileSystemError("El destino no puede estar dentro del origen")
 
     # ------------------------------------------------------------------- CRUD
-    def read_file(self, path: str, max_chars: int = _READ_DEFAULT_CHARS) -> str:
-        """Lectura acotada; nunca se devuelve un archivo de tamaño arbitrario."""
+    def read_file(
+        self,
+        path: str,
+        max_chars: int | None = None,
+        *,
+        start_line: int = 1,
+        max_lines: int = 0,
+    ) -> str:
+        """Lectura acotada; nunca se devuelve un archivo de tamaño arbitrario.
+
+        Con `max_lines` se obtiene una ventana de líneas (con cabecera `ruta:1-40 de N`),
+        que es lo que permite recorrer un archivo grande sin pedirlo entero. Con 0 se
+        mantiene el comportamiento histórico de corte por caracteres.
+        """
         self.panic.check()
+        limit = self._read_limit if max_chars is None else max_chars
+        target = self._assert_readable(path)
+        data = self._read_lossy(target, MAX_SCANNED_BYTES)
+        if max_lines <= 0 and start_line <= 1 and len(data) <= limit:
+            return data
+        return read_window(data, start_line=start_line, max_lines=max_lines, max_chars=limit, path=str(target))
+
+    def edit_file(self, path: str, find: str, replace: str, *, all: bool = False, force: bool = False) -> str:
+        """Sustitución exacta y atómica, con rechazo de la ambigüedad.
+
+        Se exige UTF-8 válido a propósito: reescribir con `errors="replace"` corrompería
+        el resto del archivo. Si no se puede leer como texto, se dice y no se toca nada.
+        """
+        self.panic.check()
+        target = self._assert_writable(path, force=force)
+        original = self._read_strict(target)
+        updated, outcome = apply_edit(original, find, replace, all_occurrences=all, path=str(target))
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(target, updated)
+        except OSError as exc:
+            raise FileSystemError(f"No se pudo escribir {target}: {exc}", context={"path": str(target)}) from exc
+        return outcome.summary()
+
+    def search_files(
+        self,
+        pattern: str,
+        path: str = ".",
+        glob: str = "**/*",
+        max_results: int = DEFAULT_MAX_RESULTS,
+        *,
+        ignore_case: bool = True,
+    ) -> str:
+        """`grep -n` sobre el árbol, sin seguir symlinks y sin leer binarios ni artefactos."""
+        self.panic.check()
+        root = self.resolve(path)
+        if not root.exists():
+            raise FileSystemError(f"No existe: {root}", context={"path": str(root)})
+        outcome = grep_tree(
+            root, pattern, glob=glob, max_results=max_results, ignore_case=ignore_case, tick=self.panic.check
+        )
+        return outcome.summary(pattern, str(root))
+
+    # ------------------------------------------------------------------ lectura
+    def _assert_readable(self, path: str | Path) -> Path:
         target = self.resolve(path)
         if not target.exists():
             raise FileSystemError(f"No existe: {target}", context={"path": str(target)})
         if target.is_dir():
             raise FileSystemError(f"Es un directorio, no un archivo: {target}")
+        return target
+
+    def _read_lossy(self, target: Path, limit: int) -> str:
         try:
             with target.open(encoding="utf-8", errors="replace") as stream:
-                data = stream.read(max_chars + 1)
+                return stream.read(limit)
         except OSError as exc:
             raise FileSystemError(f"No se pudo leer {target}: {exc}", context={"path": str(target)}) from exc
-        if len(data) > max_chars:
-            return data[:max_chars] + _TRUNCATION_NOTE.format(limit=max_chars)
-        return data
+
+    def _read_strict(self, target: Path) -> str:
+        """Lectura para editar: o UTF-8 completo y fiel, o ninguna escritura."""
+        try:
+            data = target.read_bytes()[: MAX_SCANNED_BYTES + 1]
+        except OSError as exc:
+            raise FileSystemError(f"No se pudo leer {target}: {exc}", context={"path": str(target)}) from exc
+        if len(data) > MAX_SCANNED_BYTES:
+            raise FileSystemError(
+                f"Archivo demasiado grande para editarlo a ciegas (máximo {MAX_SCANNED_BYTES} bytes): {target}",
+                context={"path": str(target)},
+            )
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FileSystemError(
+                f"{target} no es UTF-8; no se edita para no corromperlo",
+                context={"path": str(target), "error": type(exc).__name__},
+            ) from exc
 
     def write_file(self, path: str, content: str, *, force: bool = False) -> str:
         """Escritura atómica: o el contenido completo, o el archivo anterior intacto."""
@@ -343,7 +447,9 @@ class FileSystemManager:
         try:
             target.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise FileSystemError(f"No se pudo crear directorio {target}: {exc}", context={"path": str(target)}) from exc
+            raise FileSystemError(
+                f"No se pudo crear directorio {target}: {exc}", context={"path": str(target)}
+            ) from exc
         return f"Directorio listo: {target}"
 
     # -------------------------------------------------------------- procesos

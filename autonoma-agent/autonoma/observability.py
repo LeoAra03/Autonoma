@@ -49,10 +49,29 @@ __all__ = [
 
 _RESERVED_RECORD_KEYS: Final[frozenset[str]] = frozenset(
     {
-        "args", "asctime", "created", "exc_info", "exc_text", "filename", "funcName",
-        "levelname", "levelno", "lineno", "message", "module", "msecs", "msg", "name",
-        "pathname", "process", "processName", "relativeCreated", "stack_info", "taskName",
-        "thread", "threadName",
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "taskName",
+        "thread",
+        "threadName",
     }
 )
 _MAX_FIELD_CHARS: Final[int] = 400
