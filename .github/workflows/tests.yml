@@ -4,7 +4,11 @@ permissions:
   contents: read
 jobs:
   test:
-    timeout-minutes: 20  # un test colgado debe verse como fallo en minutos, no como 6 horas de CI
+    # Cota del job, no del paso: el paso `Pruebas` ya se corta solo (`timeout 900` +
+    # `--timeout=120` por test), así que 20 min sólo servían para cancelar en Windows una
+    # suite que iba lenta y dejar el resultado sin leer. 35 min dan margen al `pip install`
+    # del entorno en ese runner sin abrir la puerta a un cuelgue indefinido.
+    timeout-minutes: 35
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
