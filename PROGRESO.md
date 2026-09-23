@@ -115,3 +115,71 @@ python -m venv .venv
 .venv/bin/pip-audit --require-hashes -r autonoma-agent/requirements-lock.txt
 .venv/bin/python -m build autonoma-agent
 ```
+
+
+---
+
+## Tercera etapa — refactor enterprise (versión 2.0.0, 17-09-2026)
+
+Informe completo: [ENTERPRISE_AUDIT_2026-09.md](ENTERPRISE_AUDIT_2026-09.md). Resumen:
+
+| Comprobación | Resultado |
+| --- | --- |
+| Pruebas | 425 satisfactorias (1 omitida por requerir NTFS real) |
+| Cobertura combinada líneas/ramas | 87,3% (umbral exigido 80%) |
+| `mypy --strict` | 0 errores en los 22 módulos del paquete |
+| `ruff check` (selección amplia) | 0 avisos |
+| `validate_arguments` | 11,23 µs → 2,55 µs (4,4×) |
+| `is_protected` con 60 raíces | 1597,86 µs → 24,49 µs (65×) |
+| `tool_schemas()` | 9,01 µs y mutable → 0,11 µs e inmutable (`MappingProxyType` recursivo) |
+| `research()` con 3 páginas | 159,3 ms secuencial → 59,9 ms en abanico (2,7×) |
+| Uso de memoria por turno | estable (p95 25 MiB, `growth_ratio` 0,94× sobre 12 turnos) |
+
+Cambios de comportamiento que conviene conocer:
+
+1. `Settings` es inmutable; `run_command` devuelve `CommandResult` tipado.
+2. Los errores del agente son `AutonomaError` con `ErrorCode` y `ExitCode`; la UI ya no
+   deduce el fallo buscando substrings.
+3. `/key` y `/brave` escriben en `.env` y aplican overrides locales: **el entorno del
+   proceso no se modifica** (dejar de exportar `AUTONOMA_HOME` globalmente).
+4. Cada recarga cierra los recursos del agente anterior (había acumulación de limpiezas
+   huérfanas); `close()` es idempotente y `unregister_cleanup` coincide por igualdad.
+5. Nuevos: `--selftest`, `/status` con métricas y percentiles, `logs/autonoma.jsonl` con
+   `trace_id`, `autonoma/py.typed`, `scripts/bench.py` como puerta de regresión.
+6. Empaquetado: `autonoma.spec` unificado (onefile en cualquier SO), `build_windows.ps1`,
+   `build_portable.sh` con fallback zipapp, artefactos y Release en CI.
+7. Distribución en un comando: `scripts/bootstrap.py` (npm start, `Run-Autonoma.bat`,
+   `./run-autonoma.sh`) y `scripts/make_bundle.py` (ZIP portable con LEEME y `.sha256`);
+   ver [INSTALL.md](INSTALL.md).
+
+## Tanda 2026-09-23 — «que sea capaz de lograrlo todo»
+
+Se cerraron las carencias que quedaron listadas tras la auditoría de capacidades. Cada una
+con su módulo, sus pruebas y su puerta de seguridad intacta.
+
+| Habilidad antes inexistente | Cómo quedó | Pieza clave |
+| --- | --- | --- |
+| Editar un archivo sin reescribirlo | `edit_file` con sustitución exacta y atómica; ambigüedad (>1 coincidencia sin `all`) es un error, no una adivinanza; `append_file` para anexar | `autonoma/text_ops.py` |
+| Ver un archivo grande entero | ventanas por líneas (`start_line`/`max_lines`) con cabecera `ruta:1-40 de N`; tope de lectura configurable (`READ_LIMIT_CHARS`) | `read_window` |
+| Buscar en disco | `search_files` (`grep -n`) sin seguir symlinks, saltando binarios y carpetas de artefactos; `glob` con semántica `Path.glob` (encontraba `**/*.py` pero no `README.md`: corregido) | `grep_tree` |
+| Leer una página larga | `fetch_url` devuelve ventanas y avista cuántos caracteres quedan (`start_char`); memo de 1 página para no re-descargar; `save=true` la archiva | `SearchEngine.fetch_url` |
+| Funcionar sin clave de NoTrack | endpoint local: `http` admitido **sólo** en loopback, clave opcional, `--doctor` lo explica | `notrack_client.validate_base_url` |
+| Recordar entre ejecuciones | sesiones `sessions/<id>.jsonl` (0600, un turno por línea); `--resume`, `/sessions`, `/resume`, `/forget`, `--attach`, `/attach`, `--no-persist` | `autonoma/sessions.py` |
+| Procesos que no terminan en segundos | `spawn_command` + `job_status`/`job_output`/`kill_job`; salida a `jobs/*.log` (0600), tope duro de vivos, archivo de trabajo archivado 64 entradas | `autonoma/jobs.py` |
+| Límites bajos | iteraciones 1–200, llamadas por vuelta 1–32, historia 2–512 mensajes, lecturas hasta 400 000 caracteres, timeout de comando hasta 1800 s | `NUMERIC_BOUNDS` |
+| Turnos de investigación lentos | las llamadas de sólo lectura de una vuelta corren en paralelo (1–8 hilos); en cuanto algo escribe, se vuelve a serie y el orden del payload se conserva | `Agent._run_tool_calls` |
+| Actualizarse | `npm run update` / `python scripts/bootstrap.py update`: fetch + `merge --ff-only` + re-instalación del entorno; se niega con árbol sucio; en bundle portable dice qué bajar | `scripts/bootstrap.py` |
+
+Decisiones de seguridad que **no** se movieron: nada de sandbox simulado, la aprobación humana
+sigue siendo `SI` explícito por operación, las rutas protegidas se respetan (y `force` no las
+elude), `ALLOW_PRIVATE_NETWORK` es opt-in explícito para tocar la red local, y un trabajo en
+segundo plano muere con la sesión (`panic.register_cleanup` + `AgentResources.close`).
+
+Puerta de calidad de la tanda: 532 pruebas que pasan en ~7 s, cobertura 87,1 % (puerta 80 %),
+`ruff check` y `ruff format --check` limpios, `mypy --strict` en Linux y `--platform win32`
+sin quejas. Nuevos archivos: `text_ops.py`, `sessions.py`, `jobs.py`, `tests/test_file_editing.py`,
+`tests/test_sessions.py`, `tests/test_jobs.py`, `tests/test_tool_concurrency.py`.
+
+Lo que sigue sin poder hacer (a propósito, por ahora): ver imágenes o PDF adjuntos, leer
+binarios (UTF-8 estricto para editar, `errors="replace"` para mirar), y actuar fuera de la
+raíz de datos sin aprobación. Nada de eso se resolvió fingiendo capacidad: se documenta.
