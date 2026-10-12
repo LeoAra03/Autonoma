@@ -2,3 +2,4 @@
 -r requirements.txt
 pytest>=9.0.3,<10
 pytest-cov>=6,<8
+pytest-timeout>=2.4,<3

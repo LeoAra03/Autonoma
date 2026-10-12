@@ -115,3 +115,109 @@ python -m venv .venv
 .venv/bin/pip-audit --require-hashes -r autonoma-agent/requirements-lock.txt
 .venv/bin/python -m build autonoma-agent
 ```
+
+
+---
+
+## Tercera etapa — refactor enterprise (versión 2.0.0, 17-09-2026)
+
+Informe completo: [ENTERPRISE_AUDIT_2026-09.md](ENTERPRISE_AUDIT_2026-09.md). Resumen:
+
+| Comprobación | Resultado |
+| --- | --- |
+| Pruebas | 425 satisfactorias (1 omitida por requerir NTFS real) |
+| Cobertura combinada líneas/ramas | 87,3% (umbral exigido 80%) |
+| `mypy --strict` | 0 errores en los 22 módulos del paquete |
+| `ruff check` (selección amplia) | 0 avisos |
+| `validate_arguments` | 11,23 µs → 2,55 µs (4,4×) |
+| `is_protected` con 60 raíces | 1597,86 µs → 24,49 µs (65×) |
+| `tool_schemas()` | 9,01 µs y mutable → 0,11 µs e inmutable (`MappingProxyType` recursivo) |
+| `research()` con 3 páginas | 159,3 ms secuencial → 59,9 ms en abanico (2,7×) |
+| Uso de memoria por turno | estable (p95 25 MiB, `growth_ratio` 0,94× sobre 12 turnos) |
+
+Cambios de comportamiento que conviene conocer:
+
+1. `Settings` es inmutable; `run_command` devuelve `CommandResult` tipado.
+2. Los errores del agente son `AutonomaError` con `ErrorCode` y `ExitCode`; la UI ya no
+   deduce el fallo buscando substrings.
+3. `/key` y `/brave` escriben en `.env` y aplican overrides locales: **el entorno del
+   proceso no se modifica** (dejar de exportar `AUTONOMA_HOME` globalmente).
+4. Cada recarga cierra los recursos del agente anterior (había acumulación de limpiezas
+   huérfanas); `close()` es idempotente y `unregister_cleanup` coincide por igualdad.
+5. Nuevos: `--selftest`, `/status` con métricas y percentiles, `logs/autonoma.jsonl` con
+   `trace_id`, `autonoma/py.typed`, `scripts/bench.py` como puerta de regresión.
+6. Empaquetado: `autonoma.spec` unificado (onefile en cualquier SO), `build_windows.ps1`,
+   `build_portable.sh` con fallback zipapp, artefactos y Release en CI.
+7. Distribución en un comando: `scripts/bootstrap.py` (npm start, `Run-Autonoma.bat`,
+   `./run-autonoma.sh`) y `scripts/make_bundle.py` (ZIP portable con LEEME y `.sha256`);
+   ver [INSTALL.md](INSTALL.md).
+
+## Tanda 2026-09-23 — «que sea capaz de lograrlo todo»
+
+Se cerraron las carencias que quedaron listadas tras la auditoría de capacidades. Cada una
+con su módulo, sus pruebas y su puerta de seguridad intacta.
+
+| Habilidad antes inexistente | Cómo quedó | Pieza clave |
+| --- | --- | --- |
+| Editar un archivo sin reescribirlo | `edit_file` con sustitución exacta y atómica; ambigüedad (>1 coincidencia sin `all`) es un error, no una adivinanza; `append_file` para anexar | `autonoma/text_ops.py` |
+| Ver un archivo grande entero | ventanas por líneas (`start_line`/`max_lines`) con cabecera `ruta:1-40 de N`; tope de lectura configurable (`READ_LIMIT_CHARS`) | `read_window` |
+| Buscar en disco | `search_files` (`grep -n`) sin seguir symlinks, saltando binarios y carpetas de artefactos; `glob` con semántica `Path.glob` (encontraba `**/*.py` pero no `README.md`: corregido) | `grep_tree` |
+| Leer una página larga | `fetch_url` devuelve ventanas y avista cuántos caracteres quedan (`start_char`); memo de 1 página para no re-descargar; `save=true` la archiva | `SearchEngine.fetch_url` |
+| Funcionar sin clave de NoTrack | endpoint local: `http` admitido **sólo** en loopback, clave opcional, `--doctor` lo explica | `notrack_client.validate_base_url` |
+| Recordar entre ejecuciones | sesiones `sessions/<id>.jsonl` (0600, un turno por línea); `--resume`, `/sessions`, `/resume`, `/forget`, `--attach`, `/attach`, `--no-persist` | `autonoma/sessions.py` |
+| Procesos que no terminan en segundos | `spawn_command` + `job_status`/`job_output`/`kill_job`; salida a `jobs/*.log` (0600), tope duro de vivos, archivo de trabajo archivado 64 entradas | `autonoma/jobs.py` |
+| Límites bajos | iteraciones 1–200, llamadas por vuelta 1–32, historia 2–512 mensajes, lecturas hasta 400 000 caracteres, timeout de comando hasta 1800 s | `NUMERIC_BOUNDS` |
+| Turnos de investigación lentos | las llamadas de sólo lectura de una vuelta corren en paralelo (1–8 hilos); en cuanto algo escribe, se vuelve a serie y el orden del payload se conserva | `Agent._run_tool_calls` |
+| Actualizarse | `npm run update` / `python scripts/bootstrap.py update`: fetch + `merge --ff-only` + re-instalación del entorno; se niega con árbol sucio; en bundle portable dice qué bajar | `scripts/bootstrap.py` |
+
+Decisiones de seguridad que **no** se movieron: nada de sandbox simulado, la aprobación humana
+sigue siendo `SI` explícito por operación, las rutas protegidas se respetan (y `force` no las
+elude), `ALLOW_PRIVATE_NETWORK` es opt-in explícito para tocar la red local, y un trabajo en
+segundo plano muere con la sesión (`panic.register_cleanup` + `AgentResources.close`).
+
+Puerta de calidad de la tanda: 532 pruebas que pasan en ~7 s, cobertura 87,1 % (puerta 80 %),
+`ruff check` y `ruff format --check` limpios, `mypy --strict` en Linux y `--platform win32`
+sin quejas. Nuevos archivos: `text_ops.py`, `sessions.py`, `jobs.py`, `tests/test_file_editing.py`,
+`tests/test_sessions.py`, `tests/test_jobs.py`, `tests/test_tool_concurrency.py`.
+
+Lo que sigue sin poder hacer (a propósito, por ahora): ver imágenes o PDF adjuntos, leer
+binarios (UTF-8 estricto para editar, `errors="replace"` para mirar), y actuar fuera de la
+raíz de datos sin aprobación. Nada de eso se resolvió fingiendo capacidad: se documenta.
+
+
+---
+
+## Tanda 2026-10-12 — funcionar solo sin aflojar la puerta
+
+Objetivo del usuario: «que no tenga que estar pegando un prompt tras otro; arena.ai se demora y quiero hacer otra
+cosa mientras». Se cerraron los tres huecos que impedían el desatendido real y se construyó el lazo que falta.
+
+| Carencia nombrada | Qué la resuelve | Pieza clave |
+| --- | --- | --- |
+| «En desatendido el supervisor aporta la aprobación» era falso: sin TTY todo se negaba | Política de aprobación delegada en JSON escrito por el humano: `roots` + allow-list por herramienta (prefijos de comando, globs de ruta), `deny` con prioridad, presupuesto por turno (`max_ops`/`max_writes`/`max_deletes`/`max_seconds`) y pausa tras 3 negaciones seguidas. `--approval-policy` / `APPROVAL_POLICY` / `/policy`. `--init-policy` (o `npm run policy`) escribe una plantilla conservadora | `autonoma/approval.py` |
+| El corte por tope de iteraciones borraba la línea de control y contaminaba el historial | El aviso del motor se **añade** al texto residual y, si no había `NEXT:`, se emite uno sintético; `--resume` recupera el turno con la señal intacta | `Agent._run_turn`, `_LIMIT_CONTINUATION` |
+| `spawn_command`/`kill_job` esquivaban `--allow-commands` | La familia de comandos se gatea junta (`COMMAND_TOOLS`); el flag rige `run_command`, `spawn_command` y `kill_job` por igual | `Agent._require_local_approval` |
+| No existía supervisor: había que reinyectar el prompt a mano | `--supervise` (o `npm run lazo -- "<objetivo>"`): protocolo `NEXT`/`DONE`/`BLOCKED`, topes `--turns`/`--minutes`, reinyección del objetivo tras un corte, reintento acotado ante turnos fallidos, corte limpio ante `Ctrl+C`/pánico, informe en `supervisor/turns.jsonl`, interrupción desde otra terminal con `supervisor/STOP`, corrección de rumbo con `supervisor/steer.txt`, `/next` en la REPL. Código de salida `8` cuando el lazo no llega a `DONE` | `autonoma/supervisor.py` |
+| La caja de herramientas externa dependía de un shell y de sus comillas | `argv` (lista de programa y argumentos, sin shell) como forma preferida en `run_command` y `spawn_command`; campo `array` en el contrato con validación estricta; la política sólo autoriza `command` (texto) si se escribe `allow_shell_commands` | `tool_contracts.py`, `tool_registry._run_command`, `JobRunner.spawn` |
+| «No amplíes tu propio alcance» era un ruego del prompt | `.env`, `config.json`, el prompt propio y la propia `approval.json` entran en las raíces protegidas del gestor de archivos: el agente no puede reescribir su configuración, y un `--allow-commands` no abre la puerta a reescribir la política que lo limita | `self_config_paths`, `build_agent` |
+| Comandos irreversibles sin ningún corte | Techo duro por tokens en `prepare_command` (único cuello de first y second plan): `rm -rf /`, `mkfs`/`diskpart`/`fdisk`, `dd of=/dev/…`, `chmod -R` sobre una raíz, apagar/reiniciar, escribir el registro, tubería hacia un shell y bomba de fork. Envoltorios (`bash -c "…"`) se evalúan por dentro. No lo levanta ninguna política ni `force` | `approval.command_ceiling` |
+
+Lo que **no** se movió: no hay sandbox ni aislamiento (se sigue diciendo en una línea), el `SI` humano
+sigue siendo la puerta por defecto, las rutas críticas del SO siguen bloqueadas, `ALLOW_PRIVATE_NETWORK`
+sigue apagado por defecto, y un trabajo en segundo plano muere con la sesión. La política delegada no
+añade permisos nuevos: traslada *quién* los concede del teclado a un archivo que el usuario escribió y
+que el agente no puede tocar.
+
+Puerta de calidad de la tanda: **692 pruebas** que pasan en ~10 s (antes 533), cobertura **87,98 %**
+(sobre puerta de 80 %), `ruff check` y `ruff format --check` limpios, `mypy --strict` en Linux y
+`--platform win32` sin quejas, `--selftest --json` y `--doctor --json` ok con dos comprobaciones nuevas
+(`approval_policy`, `supervisor`). Nuevos archivos: `approval.py`, `supervisor.py`,
+`tests/test_approval_policy.py` (76 pruebas), `tests/test_supervisor_loop.py` (27 pruebas). Se añadió
+`npm run lazo` y `npm run policy`, y el guard de coherencia de `INSTALL.md` ahora lee comandos `npm run x`
+aunque traigan argumentos.
+
+Comprobación punta a punta del desatendido (sin red, sin clave): `autonoma --init-policy --data-dir X` y luego
+`autonoma --data-dir X --approval-policy approval.json --supervise --turns 2 "objetivo"` → el lazo anuncia
+`política delegada activa (8 reglas, raíces: X)`, avisa que los comandos están deshabilitados, se detiene
+inmediatamente con `no hay modelo configurado: escribe la clave con /key…`, deja `X/supervisor/turns.jsonl`
+con `state="blocked"` y sale con código 8. Ninguna operación local se ejecutó sin autorización.
