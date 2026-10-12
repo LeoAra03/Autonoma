@@ -1,0 +1,40 @@
+# Autonoma — credenciales personales (PLANTILLA)
+# Copia este archivo a credenciales.txt y pega tus claves.
+# Formato flexible: una clave por línea, CLAVE=valor
+# Líneas con # son comentarios. También puedes pegar el valor suelto si quieres.
+#
+# Este archivo es SOLO para tu equipo — está en .gitignore y nunca se sube.
+# Prioridad: variables de entorno > .env > credenciales.txt > config.json
+
+# ── Obligatoria para hablar con NoTrack.ai ──
+# Consíguela en https://notrack.ai/api-keys
+NOTRACK_API_KEY=pega-aqui-tu-clave-de-notrack
+# Ejemplo: NOTRACK_API_KEY=sk-notrack-abc123...
+
+# ── Opcional: modelo local (sin clave) ──
+# Si usas Ollama / LM Studio en tu máquina, descomenta:
+# NOTRACK_BASE_URL=http://127.0.0.1:11434/v1
+# NOTRACK_MODEL=qwen2.5:14b
+
+# ── Opcional: búsqueda mejorada ──
+# BRAVE_API_KEY=pega-aqui-tu-clave-brave
+
+# ── Cookie personal NDUS (Amazon u otro servicio) ──
+# Para que el agente pueda usar tu sesión si lo necesitas.
+# Puedes pegarlo de 3 formas, todas funcionan:
+#   NDUS=tu-valor-largo-aqui
+#   Cookie: ndus=tu-valor-largo-aqui; ubid-acb=...
+#   o simplemente el valor suelto en una línea
+NDUS=pega-aqui-tu-cookie-ndus-si-la-usas
+
+# ── Extras libres ──
+# Cualquier clave que pongas aquí queda disponible como secreto para el agente
+# y se censura en logs. Ejemplos:
+# MI_OTRA_COOKIE=...
+# SEARCH_RESULTS=5
+
+# Nombres aceptados para este archivo (cualquiera vale):
+#   credenciales.txt, mis_claves.txt, claves.txt, personal.txt, keys.txt, NDUS.txt
+# Ubicaciones aceptadas:
+#   ./credenciales.txt, ./autonoma-agent/credenciales.txt, ~/.config/autonoma/credenciales.txt
+# O fuerza la ruta con la variable AUTONOMA_CREDENTIALS_FILE=/ruta/a/tu/txt

@@ -3,6 +3,12 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .env
+credenciales.txt
+mis_claves.txt
+claves.txt
+personal.txt
+keys.txt
+NDUS.txt
 
 config.json
 .coverage

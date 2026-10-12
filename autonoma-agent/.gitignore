@@ -1,4 +1,10 @@
 .env
+credenciales.txt
+mis_claves.txt
+claves.txt
+personal.txt
+keys.txt
+NDUS.txt
 .venv/
 venv/
 __pycache__/
