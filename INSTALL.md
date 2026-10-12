@@ -101,6 +101,46 @@ autonoma "tu instrucción"
 
 ---
 
+## 5) Dejarlo correr solo (modo desatendido)
+
+Pensado para «que se encargue él mientras hago otra cosa». El lazo supervisor encadena turnos sobre
+un objetivo y se detiene solo cuando el trabajo está terminado (`DONE`), cuando algo te excede
+(`BLOCKED`) o cuando se acaba el presupuesto. No hay promesa de autonomía sin límites: lo único que
+cambia es **quién dice que sí**.
+
+```bash
+npm run policy                                  # escribe approval.json (plantilla conservadora)
+# edita approval.json: raíces, qué herramientas y qué comandos concreto autorizas
+npm run lazo -- --allow-commands --approval-policy approval.json "deja la tanda verde y documenta"
+```
+
+Sin Node, lo mismo: `python scripts/bootstrap.py policy` y
+`python scripts/bootstrap.py lazo -- --allow-commands --approval-policy approval.json "objetivo"`.
+O directamente `autonoma --supervise --allow-commands --approval-policy approval.json "objetivo"`.
+
+Qué significa cada pieza:
+
+- **`approval.json` es la única puerta del desatendido.** Es una *allow-list* escrita por ti: `roots`
+  (dónde se puede escribir), `allow` (herramienta + prefijos de comando o globs de ruta) y `budget`
+  (cuánto se puede gastar por turno). Lo que no esté listado se niega, y el archivo es de sólo lectura
+  para el agente: su ruta entra en la lista de rutas protegidas, así que no puede reescribirse el permiso.
+- **`argv` antes que `command`.** La política autoriza listas de programa+argumentos, que se ejecutan sin
+  shell: lo aprobado es exactamente lo que corre. Autorizar `command` (una línea interpretada por `sh` o
+  `cmd.exe`) exige escribir `allow_shell_commands: true`; y un comando que encadena (`;`, `&&`, `|`) deja
+  de estar cubierto por un prefijo, se niega.
+- **Un techo que no se puede negociar.** `rm -rf /`, formatear discos, apagar el equipo, entregar entrada
+  a un shell o escribir sobre un dispositivo de bloque se niegan siempre, aunque la política los nombre.
+- **Topes y salida legible.** `--turns N` (turnos máximos) y `--minutes N` (ventana). El lazo termina con
+  código `0` si hubo `DONE`, y `8` si se quedó en `BLOCKED`, agotó el presupuesto o se rindió.
+- **Interrumpirlo.** `Ctrl+C`, o `touch autonoma-agent/supervisor/STOP` desde otra terminal: el lazo se
+  corta limpio y los trabajos en segundo plano mueren con él. Para corregir el rumbo sin pararlo, escribe
+  en `supervisor/steer.txt`; se lee antes del siguiente turno y se borra.
+- **Auditarlo.** Cada turno queda en `supervisor/turns.jsonl` (qué señal devolvió el modelo, cuánto tardó,
+  con qué fallo). `--doctor` informa del estado de la política y del lazo antes de arrancar.
+
+En la terminal interactiva, el mismo mecanismo sin desatender: `/next` lanza un turno más con el paso que
+quedó pendiente y `/policy` enseña (o recarga con `/policy otra.json`) la política activa.
+
 ## Qué pasa cuando dices «listo»
 
 - El agente vive en una sola ventana: escribes, él propone acciones sobre tus archivos o la web, y
@@ -110,7 +150,7 @@ autonoma "tu instrucción"
   segundo plano en `jobs/`. `--no-persist` evita que se escriba nada y `/forget` borra una sesión concreta
   (una línea JSON por evento, con `trace_id` para atar todo un turno).
 - `Ctrl+C` cancela lo que esté haciendo; `--global-hotkey` añade la tecla `P` como botón de pánico.
-- `/help` lista los comandos (`/kb`, `/status`, `/key`, `/brave`, `/exit`).
+- `/help` lista los comandos (`/kb`, `/status`, `/key`, `/brave`, `/next`, `/policy`, `/exit`).
 - Nada sale de tu equipo salvo las llamadas a NoTrack.ai y a la búsqueda que tú pidas.
 - Ejecutar comandos del sistema está **apagado por defecto**: `--allow-commands` lo enciende y
   corre con tus permisos, sin sandbox. Léelo antes de activarlo
@@ -120,8 +160,9 @@ autonoma "tu instrucción"
 
 | Qué | Dónde |
 | --- | --- |
-| Tus notas (`knowledge_base/`), el registro (`logs/autonoma.jsonl`), las sesiones (`sessions/`) y la salida de los trabajos (`jobs/`) | en la raíz de datos activa: junto al `.exe` (modo portable) o en `autonoma-agent/` (checkout); con permisos privados y fuera de git |
+| Tus notas (`knowledge_base/`), el registro (`logs/autonoma.jsonl`), las sesiones (`sessions/`), la salida de los trabajos (`jobs/`) y el rastro del lazo (`supervisor/turns.jsonl`) | en la raíz de datos activa: junto al `.exe` (modo portable) o en `autonoma-agent/` (checkout); con permisos privados y fuera de git |
 | La clave | `autonoma-agent/.env` (o `.env` al lado del `.exe`); nunca en la línea de órdenes ni en el registro |
+| La política de aprobación delegada (`approval.json`) | donde la pongas tú; el agente no puede editarla ni borrarla |
 | Cambiar la raíz para una sesión | `--data-dir <carpeta>` (o la variable `AUTONOMA_HOME`) |
 
 `npm run update` es el único comando que toca el código: en un checkout hace `fetch` + `merge --ff-only` y re-instala el

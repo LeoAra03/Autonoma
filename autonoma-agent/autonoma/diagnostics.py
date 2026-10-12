@@ -23,8 +23,9 @@ from typing import Any, Final
 from urllib.parse import urlsplit
 
 from autonoma._version import __version__
-from autonoma.config import load_settings, project_root
-from autonoma.errors import AutonomaError
+from autonoma.approval import load_approval_policy
+from autonoma.config import Settings, load_settings, project_root
+from autonoma.errors import AutonomaError, ConfigurationError
 from autonoma.notrack_client import is_loopback_host
 from autonoma.presentation import safe_text
 from autonoma.runtime import DataOrigin, DataRoot
@@ -287,6 +288,8 @@ def _configuration_checks(data_root: DataRoot | Path | None = None) -> Sequence[
                 "allow_private_network activo: fetch_url y la investigación pueden tocar la red local.",
             )
         )
+    checks.append(_approval_policy_check(settings))
+    checks.append(_supervisor_check(settings))
     checks.append(_endpoint_check(settings.notrack_base_url))
     checks.append(_hotkey_check())
     checks.append(_dependencies_check())
@@ -335,6 +338,65 @@ def _dependencies_check() -> Check:
         CheckStatus.ERROR if "httpx" in missing else CheckStatus.WARNING,
         "Faltan dependencias: " + ", ".join(missing) + ".",
     )
+
+
+def _approval_policy_check(settings: Settings) -> Check:
+    """La política delegada es la única forma de trabajar sin TTY: si está mal, hay que decirlo antes."""
+    path = settings.approval_policy_path()
+    if path is None:
+        return Check(
+            "approval_policy",
+            CheckStatus.OK,
+            "Sin política delegada: cada operación local exige un SI humano en la terminal.",
+        )
+    if not path.is_file():
+        return Check(
+            "approval_policy", CheckStatus.ERROR, f"Política de aprobación inexistente: {safe_text(str(path))}."
+        )
+    try:
+        policy = load_approval_policy(
+            path,
+            default_root=settings.root,
+            max_bytes=settings.approval_policy_max_bytes,
+            allow_shell_commands=settings.allow_shell_commands,
+        )
+    except (ConfigurationError, ValueError, OSError) as exc:
+        detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+        return Check("approval_policy", CheckStatus.ERROR, f"Política inválida: {safe_text(detail)}")
+    if not policy.enabled:
+        return Check(
+            "approval_policy",
+            CheckStatus.WARNING,
+            f"{safe_text(str(path))}: sin reglas `allow`, no delega nada (la aprobación sigue siendo por TTY).",
+        )
+    if policy.unenforceable:
+        return Check(
+            "approval_policy",
+            CheckStatus.WARNING,
+            "Reglas sobre herramientas inexistentes: " + ", ".join(policy.unenforceable) + ". No autorizan nada.",
+        )
+    roots = ", ".join(str(root) for root in policy.roots) or "(las que fije cada regla)"
+    return Check(
+        "approval_policy",
+        CheckStatus.OK,
+        f"{len(policy.allow)} reglas allow, {len(policy.deny)} deny; raíces: {safe_text(roots)}; "
+        f"presupuesto {policy.budget.max_ops} ops/{policy.budget.max_writes} escrituras por turno; "
+        f"shell delegable: {'sí' if policy.allow_shell_commands else 'no (solo argv)'}.",
+    )
+
+
+def _supervisor_check(settings: Settings) -> Check:
+    """El lazo se anuncia con sus topes: si van a correr desatendidos, eso es lo primero que falla."""
+    detail = (
+        f"lazo: {settings.supervisor_max_turns} turnos de tope, {settings.supervisor_max_minutes:g} min de ventana"
+        + (", se detiene en BLOCKED" if settings.supervisor_stop_on_block else ", sigue tras un BLOCKED")
+    )
+    goal = (settings.supervisor_goal_file or "").strip()
+    if goal and not Path(goal).expanduser().is_file():
+        return Check("supervisor", CheckStatus.ERROR, f"Archivo de objetivo inexistente: {safe_text(goal)}.")
+    if goal:
+        detail += f"; objetivo en {safe_text(goal)}"
+    return Check("supervisor", CheckStatus.OK, detail + ".")
 
 
 def _check_plan(data_root: DataRoot | Path | None) -> tuple[CheckFn, ...]:

@@ -19,11 +19,13 @@ from typing import Any, Final, Literal
 from autonoma.errors import ToolContractError
 
 __all__ = [
+    "COMMAND_TOOLS",
     "LOCAL_TOOLS",
     "TOOL_SPECS",
     "ToolField",
     "ToolSpec",
     "ToolValidationError",
+    "command_tool_names",
     "parse_arguments",
     "spec_for",
     "tool_names",
@@ -43,7 +45,15 @@ _BLANK_FORBIDDEN_KEYS: Final[frozenset[str]] = frozenset(
     {"path", "src", "dst", "query", "title", "command", "url", "find", "pattern"}
 )
 
-FieldType = Literal["string", "integer", "number", "boolean"]
+#: Herramientas que lanzan procesos: su identidad de autorización es `argv` (lista) o `command` (shell).
+COMMAND_TOOLS: Final[frozenset[str]] = frozenset({"run_command", "spawn_command", "kill_job"})
+#: Las que *arrancan* algo: una de las dos formas de comando es obligatoria (kill_job no la tiene).
+LAUNCH_TOOLS: Final[frozenset[str]] = frozenset({"run_command", "spawn_command"})
+
+FieldType = Literal["string", "integer", "number", "boolean", "array"]
+
+#: Topes de un campo `array`: bastante para un argv realista y corta para un JSON degenerado.
+_MAX_ARRAY_ITEMS: Final[int] = 64
 
 #: Todo lo que toca el disco o lanza procesos pasa por la aprobación humana explícita.
 LOCAL_TOOLS: Final[frozenset[str]] = frozenset(
@@ -70,7 +80,7 @@ class ToolValidationError(ToolContractError):
 
 
 _TYPE_TUPLE: Final[Mapping[str, tuple[type, ...]]] = MappingProxyType(
-    {"string": (str,), "boolean": (bool,), "integer": (int,), "number": (int, float)}
+    {"string": (str,), "boolean": (bool,), "integer": (int,), "number": (int, float), "array": (list,)}
 )
 
 
@@ -89,6 +99,7 @@ class ToolField:
     type: FieldType
     description: str = ""
     required: bool = True
+    max_items: int | None = None
     max_length: int | None = None
     minimum: float | None = None
     maximum: float | None = None
@@ -100,6 +111,10 @@ class ToolField:
         if self.type == "string":
             schema["maxLength"] = self.max_length or _MAX_SCALAR_CHARS
             schema["minLength"] = 0 if self.name not in _BLANK_FORBIDDEN_KEYS else 1
+        elif self.type == "array":
+            schema["items"] = {"type": "string", "maxLength": self.max_length or _MAX_SCALAR_CHARS}
+            schema["minItems"] = 1
+            schema["maxItems"] = self.max_items or _MAX_ARRAY_ITEMS
         elif self.type in ("integer", "number"):
             schema["minimum"] = self.minimum
             schema["maximum"] = self.maximum
@@ -111,6 +126,19 @@ class ToolField:
         if self.type == "boolean":
             if not isinstance(value, bool):
                 return f"Tipo inválido para {self.name}: se requiere boolean"
+        elif self.type == "array":
+            if not isinstance(value, list):
+                return f"Tipo inválido para {self.name}: se requiere una lista de textos"
+            cap = self.max_items or _MAX_ARRAY_ITEMS
+            if not value or len(value) > cap:
+                return f"{self.name} debe tener entre 1 y {cap} elementos"
+            for item in value:
+                if not isinstance(item, str):
+                    return f"{self.name} admite sólo textos"
+                reason = self._reject_text(item)
+                if reason is not None:
+                    return reason
+            return None
         elif isinstance(value, bool) or not isinstance(value, expected):
             return f"Tipo inválido para {self.name}: se requiere {self.type}"
         if self.type == "string":
@@ -123,6 +151,13 @@ class ToolField:
             return f"{self.name} debe ser finito"
         elif self.minimum is not None and self.maximum is not None and not self.minimum <= value <= self.maximum:
             return f"{self.name} debe estar entre {self.minimum:g} y {self.maximum:g}"
+        return None
+
+    def _reject_text(self, text: str) -> str | None:
+        if len(text) > (self.max_length or _MAX_SCALAR_CHARS) or _FORBIDDEN_CHARS in text:
+            return f"Tamaño o contenido inválido para {self.name}"
+        if not text.strip():
+            return f"{self.name} no puede tener elementos vacíos"
         return None
 
     def validate(self, value: Any) -> Any:
@@ -144,6 +179,17 @@ def _number(name: str, description: str, minimum: float, maximum: float, *, inte
         minimum=minimum,
         maximum=maximum,
         required=False,
+    )
+
+
+def _argv(name: str = "argv", description: str = "", *, max_length: int | None = None) -> ToolField:
+    return ToolField(
+        name=name,
+        type="array",
+        description=description,
+        required=False,
+        max_items=_MAX_ARRAY_ITEMS,
+        max_length=max_length,
     )
 
 
@@ -336,7 +382,22 @@ TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
             "La salida se acumula en un archivo legible con job_output; el proceso sobrevive al "
             "turno, no a la sesión."
         ),
-        fields=(_string("command"), _string("cwd", "Directorio de trabajo opcional", required=False)),
+        fields=(
+            _string(
+                "command",
+                "Línea para el shell local; mutuamente exclusiva con argv",
+                required=False,
+            ),
+            _argv(
+                description=(
+                    'Programa y argumentos como lista (p. ej. ["git", "status", "--porcelain"]). '
+                    "Sin shell: cada elemento es un argumento literal, con espacios, tildes o `|` incluidos. "
+                    "Úsala siempre que no necesites tuberías ni redirecciones."
+                ),
+                max_length=_MAX_SCALAR_CHARS,
+            ),
+            _string("cwd", "Directorio de trabajo opcional", required=False),
+        ),
         local=True,
     ),
     ToolSpec(
@@ -361,8 +422,22 @@ TOOL_SPECS: Final[tuple[ToolSpec, ...]] = (
     ),
     ToolSpec(
         name="run_command",
-        description="Ejecuta un programa o comando de shell en la máquina local y devuelve stdout/stderr.",
-        fields=(_string("command"), _string("cwd", "Directorio de trabajo opcional", required=False), _TIMEOUT),
+        description=(
+            "Ejecuta un programa y devuelve stdout/stderr. Dos formas, excluyentes: `argv` "
+            "(lista, sin shell, la preferida) o `command` (texto, pasa por cmd.exe o /bin/sh)."
+        ),
+        fields=(
+            _string("command", "Línea para el shell local; mutuamente exclusiva con argv", required=False),
+            _argv(
+                description=(
+                    'Programa y argumentos como lista (p. ej. ["rg", "TODO", "src"]). Sin shell: '
+                    "no hay tuberías ni redirecciones, y el nombre del programa no puede llevar espacios."
+                ),
+                max_length=_MAX_SCALAR_CHARS,
+            ),
+            _string("cwd", "Directorio de trabajo opcional", required=False),
+            _TIMEOUT,
+        ),
         local=True,
     ),
 )
@@ -430,4 +505,23 @@ def parse_arguments(raw: Any) -> dict[str, Any]:
 
 def validate_arguments(name: str, raw: Any) -> dict[str, Any]:
     """Valores ya tipados y acotados, listos para ejecutar sin segundas conversiones."""
-    return spec_for(name).validate(parse_arguments(raw))
+    clean = spec_for(name).validate(parse_arguments(raw))
+    if name in LAUNCH_TOOLS:
+        has_command = clean.get("command") is not None
+        has_argv = clean.get("argv") is not None
+        if has_command and has_argv:
+            raise ToolValidationError(
+                "usa `argv` (lista, sin shell) o `command` (texto, con shell), no ambos",
+                context={"tool": name},
+            )
+        if not has_command and not has_argv:
+            raise ToolValidationError(
+                "falta `command` (texto, con shell) o `argv` (lista, sin shell)",
+                context={"tool": name},
+            )
+    return clean
+
+
+def command_tool_names() -> frozenset[str]:
+    """Herramientas sujetas al flag --allow-commands y a la identidad de autorización."""
+    return COMMAND_TOOLS

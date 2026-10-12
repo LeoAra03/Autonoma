@@ -645,6 +645,11 @@ COMMANDS: Mapping[str, tuple[object, bool]] = {
     "update": (run_update, False),
     "doctor": (lambda venv, opts: run_cli_direct(venv, opts, ["--doctor", *opts.args]), False),
     "selftest": (lambda venv, opts: run_cli_direct(venv, opts, ["--selftest", "--json", *opts.args]), False),
+    # El lazo y la plantilla de política son un nombre, no una línea de flags: lo que se quiere
+    # es escribir `npm run lazo -- "objetivo"` e irse a hacer otra cosa. No se añade
+    # --allow-commands ni una política por detras: eso lo decide quien escribe los argumentos.
+    "lazo": (lambda venv, opts: run_cli_direct(venv, opts, ["--supervise", *opts.args]), False),
+    "policy": (lambda venv, opts: run_cli_direct(venv, opts, ["--init-policy", *opts.args]), False),
     "test": (lambda venv, opts: run_in_venv(venv, opts, "test"), True),
     "lint": (lambda venv, opts: run_in_venv(venv, opts, "lint"), True),
     "format": (lambda venv, opts: run_in_venv(venv, opts, "format"), True),
@@ -672,7 +677,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bootstrap",
         description="Instala y lanza Autonoma con un solo comando (npm start, Run-Autonoma.bat o esto).",
-        epilog="Todo lo que pongas después del comando se pasa tal cual a autonoma:  bootstrap run --plain 'resume mis notas'",
+        epilog=(
+            "Todo lo que pongas después del comando se pasa tal cual a autonoma:  bootstrap run --plain 'resume mis notas'.\n"
+            "Desatendido:  npm run lazo -- --approval-policy approval.json \"termina la tanda\"   (ver `policy` para crearla)"
+        ),
     )
     parser.add_argument("command", choices=tuple(COMMANDS))
     parser.add_argument("--python", help="intérprete a usar (por defecto se busca en el PATH)")

@@ -70,7 +70,9 @@ def test_force_cannot_override(tmp_path):
 )
 def test_local_tools_deny_without_approval(tool, args):
     """Sin callback de aprobación ninguna herramienta local se ejecuta, con argumentos válidos."""
-    agent = Agent(Settings(), PanicController(), None, None, None)
+    # `allow_commands=True` para que lo único que se pruebe aquí sea la ausencia de aprobación:
+    # con los comandos apagados hay otra puerta (más arriba) y el mensaje sería otro.
+    agent = Agent(Settings(allow_commands=True), PanicController(), None, None, None)
     outcome = agent.run_tool(tool, args, user_prompt="yes")
     assert not outcome.ok
     assert "denegada" in outcome.output

@@ -506,3 +506,25 @@ def test_update_on_a_portable_install_points_to_the_release(monkeypatch: pytest.
 def test_update_is_a_documented_command() -> None:
     assert "update" in bootstrap.COMMANDS
     assert bootstrap.COMMANDS["update"][0] is bootstrap.run_update
+
+
+# --------------------------------------------------------------------------- lazo y política
+def test_lazo_anade_supervise_y_nada_mas(capsys: pytest.CaptureFixture[str]) -> None:
+    """`npm run lazo` es `--supervise` y punto: permisos y política los escribe el usuario."""
+    lazo = bootstrap.COMMANDS["lazo"][0]
+    assert lazo(Path("/tmp/x"), opts("lazo", "--approval-policy", "a.json", "objetivo")) == 0
+    salida = capsys.readouterr().out
+    assert "--supervise --approval-policy a.json objetivo" in salida
+    assert "--allow-commands" not in salida
+
+
+def test_policy_pide_la_plantilla_con_force_incluido(capsys: pytest.CaptureFixture[str]) -> None:
+    policy = bootstrap.COMMANDS["policy"][0]
+    assert policy(Path("/tmp/x"), opts("policy", "--force")) == 0
+    assert "--init-policy --force" in capsys.readouterr().out
+
+
+def test_lazo_y_policy_son_comandos_conocidos() -> None:
+    assert {"lazo", "policy"} <= set(bootstrap.COMMANDS)
+    for nombre in ("lazo", "policy"):
+        assert bootstrap.COMMANDS[nombre][1] is False  # no requieren herramientas de desarrollo

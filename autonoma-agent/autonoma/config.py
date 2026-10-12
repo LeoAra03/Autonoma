@@ -124,6 +124,11 @@ NUMERIC_BOUNDS: Final[tuple[NumericBound, ...]] = (
     NumericBound("fetch_char_limit", "int", 1_000, 200_000, 12_000),
     NumericBound("page_max_bytes", "int", 100_000, 16_000_000, 4_000_000),
     NumericBound("read_limit_chars", "int", 1_000, 400_000, 80_000),
+    # El lazo supervisor: cuántos turnos se persigue el objetivo antes de devolver el control.
+    NumericBound("supervisor_max_turns", "int", 1, 200, 12),
+    NumericBound("supervisor_max_minutes", "float", 1, 1_440, 90.0),
+    NumericBound("supervisor_idle_seconds", "float", 0, 3_600, 0.0),
+    NumericBound("approval_policy_max_bytes", "int", 1_024, 1_048_576, 262_144),
 )
 
 
@@ -134,6 +139,8 @@ class Settings:
     allow_commands: bool = False
     session_persist: bool = True
     allow_private_network: bool = False
+    #: Autoriza que la política delegada alcance `command` (shell), no sólo `argv` (ejecución directa).
+    allow_shell_commands: bool = False
     notrack_api_key: str = ""
     notrack_base_url: str = DEFAULT_NOTRACK_BASE_URL
     notrack_model: str = DEFAULT_NOTRACK_MODEL
@@ -153,6 +160,15 @@ class Settings:
     fetch_pages: int = 3
     command_timeout: float = 60.0
     log_dir: str = ""
+    supervisor_dir: str = ""
+    approval_policy: str = ""
+    system_prompt_file: str = ""
+    supervisor_goal_file: str = ""
+    supervisor_max_turns: int = 12
+    supervisor_max_minutes: float = 90.0
+    supervisor_idle_seconds: float = 0.0
+    supervisor_stop_on_block: bool = True
+    approval_policy_max_bytes: int = 262_144
     root_dir: Path | None = None
     declared_keys: tuple[str, ...] = ()
     dotenv_status: DotEnvStatus = DotEnvStatus.MISSING
@@ -179,6 +195,18 @@ class Settings:
 
     def jobs_path(self) -> Path:
         return self._resolve_under_root(self.jobs_dir, "jobs")
+
+    def supervisor_path(self) -> Path:
+        """Registro del lazo (informes, `steer.txt`, `STOP`): vive junto a las sesiones."""
+        return self._resolve_under_root(self.supervisor_dir, "supervisor")
+
+    def approval_policy_path(self) -> Path | None:
+        """Ruta de la política de aprobación delegada, o `None` si no se configuró ninguna."""
+        raw = self.approval_policy.strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        return path if path.is_absolute() else (self.root / path).resolve()
 
     @property
     def local_endpoint(self) -> bool:
@@ -415,6 +443,10 @@ def load_settings(
         log_dir=pick("LOG_DIR", "log_dir"),
         sessions_dir=pick("SESSIONS_DIR", "sessions_dir"),
         jobs_dir=pick("JOBS_DIR", "jobs_dir"),
+        supervisor_dir=pick("SUPERVISOR_DIR", "supervisor_dir"),
+        approval_policy=pick("APPROVAL_POLICY", "approval_policy"),
+        system_prompt_file=pick("SYSTEM_PROMPT_FILE", "system_prompt_file"),
+        supervisor_goal_file=pick("SUPERVISOR_GOAL_FILE", "supervisor_goal_file"),
         max_tool_iterations=int(numerics["max_tool_iterations"]),
         max_tool_calls_per_turn=int(numerics["max_tool_calls_per_turn"]),
         max_parallel_tool_calls=int(numerics["max_parallel_tool_calls"]),
@@ -422,8 +454,14 @@ def load_settings(
         fetch_char_limit=int(numerics["fetch_char_limit"]),
         page_max_bytes=int(numerics["page_max_bytes"]),
         read_limit_chars=int(numerics["read_limit_chars"]),
+        supervisor_max_turns=int(numerics["supervisor_max_turns"]),
+        supervisor_max_minutes=float(numerics["supervisor_max_minutes"]),
+        supervisor_idle_seconds=float(numerics["supervisor_idle_seconds"]),
+        approval_policy_max_bytes=int(numerics["approval_policy_max_bytes"]),
+        supervisor_stop_on_block=_as_bool(pick("SUPERVISOR_STOP_ON_BLOCK", "supervisor_stop_on_block", "true")),
         session_persist=_as_bool(pick("SESSION_PERSIST", "session_persist", "true")),
         allow_private_network=_as_bool(pick("ALLOW_PRIVATE_NETWORK", "allow_private_network", "false")),
+        allow_shell_commands=_as_bool(pick("ALLOW_SHELL_COMMANDS", "allow_shell_commands", "false")),
         http_timeout=float(numerics["http_timeout"]),
         command_timeout=float(numerics["command_timeout"]),
         search_results=int(numerics["search_results"]),
@@ -482,5 +520,9 @@ def dump_public_config(settings: Settings) -> dict[str, Any]:
     data["knowledge_dir_resolved"] = str(settings.knowledge_path())
     data["log_dir_resolved"] = str(settings.log_path())
     data["sessions_dir_resolved"] = str(settings.sessions_path())
+    data["supervisor_dir_resolved"] = str(settings.supervisor_path())
+    policy_path = settings.approval_policy_path()
+    data["approval_policy_resolved"] = str(policy_path) if policy_path is not None else ""
+    data["approval_policy_present"] = bool(policy_path is not None and policy_path.is_file())
     data["local_endpoint"] = settings.local_endpoint
     return data

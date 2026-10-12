@@ -20,20 +20,33 @@ import os
 import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from getpass import getpass
+from pathlib import Path
 from typing import Any, Final
 
 from autonoma import __app_name__, __version__
-from autonoma.agent import Agent, build_agent
+from autonoma.agent import Agent, build_agent, build_approval_policy
+from autonoma.approval import ApprovalPolicy, load_approval_policy, write_policy_template
 from autonoma.config import Settings, load_settings, save_api_keys
 from autonoma.diagnostics import run_diagnostics, run_selftest
-from autonoma.errors import AutonomaError, ExitCode
+from autonoma.errors import AutonomaError, CancelledByUserError, ExitCode
 from autonoma.key_handler import KeyHandler, ListenerStatus, PanicController, PanicError
 from autonoma.observability import MetricsRegistry, configure_logging, current_trace_id, log_event
 from autonoma.ports import ConsolePort, EventKind
 from autonoma.presentation import approval_heading, operation_preview, safe_text
 from autonoma.runtime import RenderPreferences, RuntimeContext
 from autonoma.sessions import SessionStore
+from autonoma.supervisor import (
+    TURNS_FILENAME,
+    SupervisorBudget,
+    SupervisorOutcome,
+    SupervisorReport,
+    goal_from_file,
+    parse_continuation,
+    run_supervisor,
+    task_prompt,
+)
 
 __all__ = ["HELP_TEXT", "Session", "build_console", "main", "parse_args", "repl"]
 
@@ -72,6 +85,8 @@ Comandos
   /resume [id]       retomar el historial de una sesión
   /attach <ruta>     meter un archivo en el contexto de esta sesión
   /forget            borrar el historial visible Y la sesión en disco
+  /next [objetivo]   un turno más del lazo con el paso que quedó pendiente
+  /policy [ruta]     ver la política de aprobación delegada, o recargar otra
   /panic             activar cancelación entre tareas
 
 Pánico
@@ -227,6 +242,9 @@ class Session:
     # teniendo capa de memoria vacía en vez de `AttributeError` a mitad de turno.
     _attachments: Sequence[str] = ()
     _startup_notice: tuple[str, str] | None = None
+    approval_policy: ApprovalPolicy | None = None
+    _last_goal: str = ""
+    _last_next: str = ""
 
     def __init__(
         self,
@@ -259,6 +277,9 @@ class Session:
             version=__version__,
         )
         self.panic = PanicController()
+        # La política se carga ANTES del agente: su archivo tiene que quedar bajo la protección
+        # de rutas, y una política ilegible es un fallo de configuración, no un silencio.
+        self.approval_policy = build_approval_policy(self.settings)
         self.handler = KeyHandler(self.panic, enabled=global_hotkey)
         try:
             self._listener_status = self.handler.start()
@@ -279,7 +300,13 @@ class Session:
         ).with_allow_commands(allow=self.context.allow_commands)
 
     def _build_agent(self) -> Agent:
-        agent = build_agent(self.settings, self.panic, metrics=self.metrics, approve=self.approve)
+        agent = build_agent(
+            self.settings,
+            self.panic,
+            metrics=self.metrics,
+            approve=self.approve,
+            approval_policy=self.approval_policy,
+        )
         agent.approve = self.approve
         return agent
 
@@ -390,8 +417,38 @@ class Session:
         return self.context.render
 
     # -------------------------------------------------------------- aprobación
+    def _policy_gate(self, name: str, args: Mapping[str, Any]) -> bool | None:
+        """Decisión de la política delegada: `True`/`False`, o `None` si no decide (hay que preguntar).
+
+        El orden es deliberado: la política puede negar sin molestar a nadie, pero nunca puede
+        inventar un `SI`. La allow-list la escribió un humano fuera del agente, y el agente no
+        puede reescribirla porque su ruta está bajo protección del sistema de archivos.
+        """
+        policy = self.approval_policy
+        if policy is None or not policy.enabled:
+            return None
+        state = self.agent.policy_state
+        decision = policy.decide(name, args, state, tty_available=sys.stdin.isatty())
+        if decision.allowed and decision.needs_confirm:
+            return None  # la regla exige un SI humano pese a estar listada
+        policy.record(name, decision.rule, state, allowed=decision.allowed)
+        log_event(
+            logging.getLogger(__name__),
+            logging.INFO if decision.allowed else logging.WARNING,
+            "approval.delegated" if decision.allowed else "approval.denied",
+            {"tool": name, "rule": decision.rule, "reason": decision.reason, "ops": state.ops},
+        )
+        if decision.allowed:
+            self.console.print(f"  autorizada por la política: {decision.rule}", style="ok")
+            return True
+        self.console.print(f"  negada por la política: {decision.reason}", style="warn")
+        return False
+
     def approve(self, name: str, args: Mapping[str, Any], user_prompt: str = "") -> bool:
-        """Puerta de seguridad: requiere `SI` explícito en una TTY, nunca del modelo."""
+        """Puerta de seguridad: `SI` explícito en una TTY, o la política delegada. Nunca del modelo."""
+        decided = self._policy_gate(name, args)
+        if decided is not None:
+            return decided
         if not sys.stdin.isatty():
             return False
         self.console.print(approval_heading(name, user_prompt))
@@ -401,13 +458,35 @@ class Session:
         was_busy = self.panic.busy
         self.panic.mark_idle()  # pulsar P al escribir la confirmación no debe cancelar la confirmación
         try:
-            return self.console.input("¿Autorizar esta operación? Escribe SI: ").strip() == _CONFIRMATION_WORD
+            granted = self.console.input("¿Autorizar esta operación? Escribe SI: ").strip() == _CONFIRMATION_WORD
         except (EOFError, KeyboardInterrupt):
+            self._account_approval(name, allowed=False)
             self.panic.panic()
             return False
         finally:
             if was_busy:
                 self.panic.mark_busy()
+        self._account_approval(name, allowed=granted)
+        return granted
+
+    def _approval_mode(self) -> str:
+        policy = self.approval_policy
+        if policy is None or not policy.enabled:
+            return "SI humano en la TTY (sin política delegada)"
+        state = self.agent.policy_state
+        return (
+            f"política delegada: {len(policy.allow)} reglas allow, {len(policy.deny)} deny · "
+            f"gastado {state.ops}/{policy.budget.max_ops} ops, {state.writes}/{policy.budget.max_writes} escrituras, "
+            f"{state.denials} negaciones"
+        )
+
+    def _account_approval(self, name: str, *, allowed: bool) -> None:
+        """El `SI` de la TTY también gasta presupuesto si hay política activa: un solo reloj."""
+        policy = self.approval_policy
+        if policy is None or not policy.enabled:
+            return
+        state = self.agent.policy_state
+        policy.record(name, "(tty)" if allowed else "", state, allowed=allowed)
 
     def rebuild_agent(self) -> None:
         """Recarga ajustes y recursos cerrando los anteriores (sin fugas de limpieza)."""
@@ -423,6 +502,8 @@ class Session:
             f"NoTrack URL : {self.settings.notrack_base_url}",
             f"Modelo      : {self.settings.notrack_model}",
             f"shell local : {'habilitado, sin aislamiento' if self.settings.allow_commands else 'deshabilitado'}",
+            f"aprobación  : {self._approval_mode()}",
+            f"lazo        : {self.settings.supervisor_max_turns} turnos / {self.settings.supervisor_max_minutes:g} min",
             f"Brave key   : {'sí' if self.settings.has_brave_key else 'no (se usará Playwright/HTML)'}",
             f"knowledge   : {self.settings.knowledge_path()}  ({len(list(self.settings.knowledge_path().glob('*.md')))} md)",
             f"sesión      : {self.session_id} ({'en disco' if self.sessions.enabled else 'sin persistencia'})",
@@ -445,9 +526,17 @@ class Session:
     # -------------------------------------------------------------------- turno
     def run_prompt(self, prompt: str) -> int:
         """Devuelve el código de salida del turno (0 ok, no cero ante fallo accionable)."""
+        self._last_goal = prompt
+        answer, code = self.run_turn(prompt)
+        if code == int(ExitCode.SUCCESS):
+            self._render_answer(answer)
+        return code
+
+    def run_turn(self, prompt: str) -> tuple[str, int]:
+        """Un turno suelto: `(respuesta, código)`. Es la pieza que consume el lazo supervisor."""
         if not self.agent.notrack.configured:
             self.console.print("Configura la clave con /key antes de ejecutar prompts.", style="err")
-            return int(ExitCode.CONFIGURATION)
+            return "", int(ExitCode.CONFIGURATION)
         if self._attachments:
             prompt = "\n\n".join([*self._attachments, prompt])
             self._attachments = []
@@ -460,21 +549,111 @@ class Session:
             self.panic.panic()
             reporter.stop()
             self.console.print("Detenido por usuario", style="err")
-            return int(ExitCode.CANCELLED)
+            return "", int(ExitCode.CANCELLED)
         except AutonomaError as exc:
             reporter.stop()
             self.console.print(safe_text(exc.user_message()), style="err")
             log_event(logging.getLogger(__name__), exc.severity, "cli.turn_error", exc.to_log_fields())
-            return int(exc.exit_code)
+            return "", int(exc.exit_code)
         except Exception as exc:  # noqa: BLE001 — frontera de CLI: registrar y mostrar, no trazar bruto
             reporter.stop()
             log_event(logging.getLogger(__name__), logging.ERROR, "cli.unexpected_error", {"error": type(exc).__name__})
             self.console.print(safe_text("Error interno; revisa logs/autonoma.log con el trace_id."), style="err")
-            return int(ExitCode.INTERNAL)
+            return "", int(ExitCode.INTERNAL)
         finally:
             reporter.stop()
-        self._render_answer(answer)
-        return int(ExitCode.SUCCESS)
+        # El paso pendiente de este turno es el punto de partida de `/next` y del lazo.
+        self._last_next = parse_continuation(answer).instruction
+        return answer, int(ExitCode.SUCCESS)
+
+    def run_supervised(self, goal: str, *, budget: SupervisorBudget | None = None) -> SupervisorOutcome:
+        """Encadena turnos tras un objetivo hasta DONE / BLOCKED / tope, con informe en disco.
+
+        No hay canal de auto-aprobación aquí: lo que autoriza es la política escrita por el usuario
+        (o su `SI` en la TTY). El lazo sólo decide *cuándo* volver a preguntar por el mismo objetivo.
+        """
+        settings = self.settings
+        effective = budget or SupervisorBudget(
+            max_turns=settings.supervisor_max_turns,
+            max_minutes=settings.supervisor_max_minutes,
+            idle_seconds=settings.supervisor_idle_seconds,
+        )
+        directory = settings.supervisor_path()
+        self._last_goal = goal
+        if not self.agent.notrack.configured:
+            # Sin modelo no hay lazo posible: se dice una vez, no se gasta el presupuesto en
+            # reintentos que van a fallar igual.
+            reason = (
+                "no hay modelo configurado: escribe la clave con /key o apunta NOTRACK_BASE_URL a "
+                "un servidor local (Ollama, LM Studio)"
+            )
+            self.console.print(f"el lazo no arranca: {reason}", style="err")
+            informe = SupervisorReport(
+                goal=goal,
+                session_id=self.session_id,
+                turns=(),
+                state="blocked",
+                summary=reason,
+                stopped_by="modelo sin configurar",
+            )
+            informe.save(directory)
+            return SupervisorOutcome(state="blocked", summary=reason, report=informe)
+        self.console.print(
+            f"lazo supervisor: {effective.max_turns} turnos · {effective.max_minutes:g} min · "
+            f"informe en {directory / TURNS_FILENAME}",
+            style="muted",
+        )
+        if self.approval_policy is not None and self.approval_policy.enabled:
+            self.console.print(
+                f"política delegada activa ({len(self.approval_policy.allow)} reglas, "
+                f"raíces: {', '.join(str(root) for root in self.approval_policy.roots) or '(las de la política)'})",
+                style="ok",
+            )
+        elif not sys.stdin.isatty():
+            self.console.print(
+                "sin TTY y sin política de aprobación: toda operación local se va a negar. "
+                "Configura APPROVAL_POLICY o corre en una terminal interactiva.",
+                style="warn",
+            )
+        if not settings.allow_commands:
+            self.console.print(
+                "comandos deshabilitados: el lazo no podrá usar la caja de herramientas externa "
+                "(arranca con --allow-commands si quieres que lea PDF, descargue o maneje un navegador).",
+                style="muted",
+            )
+
+        def turn(prompt: str) -> str:
+            answer, code = self.run_turn(prompt)
+            if code == int(ExitCode.SUCCESS):
+                return answer
+            if code == int(ExitCode.CANCELLED):
+                raise CancelledByUserError("turno cancelado por el usuario")
+            raise AutonomaError(f"el turno del lazo terminó con código de salida {code}")
+
+        return run_supervisor(
+            goal,
+            turn,
+            budget=effective,
+            session_id=self.session_id,
+            report_dir=directory,
+            on_event=lambda kind, message: self.console.print(f"  [{kind}] {safe_text(message)}", style="muted"),
+            is_cancelled=lambda: self.panic.is_set,
+            stop_on_block=settings.supervisor_stop_on_block,
+        )
+
+    def report_supervised(self, outcome: SupervisorOutcome) -> None:
+        """Cierre legible del lazo: estado, turnos y el resumen que devolvió el modelo."""
+        labels = {
+            "done": ("objetivo terminado", "ok"),
+            "blocked": ("bloqueado: hace falta algo tuyo", "warn"),
+            "exhausted": ("presupuesto del lazo agotado", "warn"),
+            "cancelled": ("cancelado", "err"),
+            "failed": ("el lazo se rindió", "err"),
+        }
+        label, style = labels.get(outcome.state, ("el lazo terminó", "warn"))
+        self.console.print(f"\nlazo: {label} · {len(outcome.report.turns)} turnos", style=style)
+        if outcome.summary:
+            self._render_answer(outcome.summary)
 
     def _render_answer(self, answer: str) -> None:
         self.console.print()
@@ -546,6 +725,55 @@ class Session:
             self.console.print("archivo añadido al contexto de esta sesión", style="ok")
         return True
 
+    def _cmd_next(self, _rest: str = "") -> bool:
+        raw = _rest.strip()
+        goal = raw or self._last_goal
+        if not goal:
+            self.console.print("no hay objetivo pendiente: /next <objetivo>", style="err")
+            return True
+        continuation = "" if raw else self._last_next
+        self._last_goal = goal
+        answer, code = self.run_turn(task_prompt(goal, continuation=continuation))
+        if code == int(ExitCode.SUCCESS):
+            self._render_answer(answer)
+        return True
+
+    def _cmd_policy(self, _rest: str = "") -> bool:
+        raw = _rest.strip()
+        if raw:
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                candidate = (self.settings.root / candidate).resolve()
+            try:
+                loaded = load_approval_policy(
+                    candidate,
+                    default_root=self.settings.root,
+                    max_bytes=self.settings.approval_policy_max_bytes,
+                )
+            except (AutonomaError, ValueError, OSError) as exc:
+                detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+                self.console.print(f"política inválida: {safe_text(detail)}", style="err")
+                return True
+            # Reconstruir el agente es lo que pone la nueva política bajo protección de rutas.
+            self.approval_policy = loaded
+            self.settings = replace(self.settings, approval_policy=str(candidate))
+            # `rebuild_agent` ya inyecta la política en el agente nuevo y, con ella, la ruta de la
+            # política bajo la protección de rutas del sistema de archivos.
+            self.rebuild_agent()
+            self.console.print(f"política activada: {candidate}", style="ok")
+            return True
+        policy = self.approval_policy
+        if policy is None:
+            self.console.print(
+                "sin política delegada: cada operación local exige tu SI en la terminal\n"
+                "  para desatender, escribe approval.json y arranca con --approval-policy approval.json",
+                style="muted",
+            )
+            return True
+        self.console.print(safe_text(json.dumps(policy.describe(), indent=2, ensure_ascii=False)))
+        self.console.print(safe_text(json.dumps(self.agent.policy_state.snapshot(), indent=2)))
+        return True
+
     def _cmd_clear(self, _rest: str = "") -> bool:
         self.agent.reset_history()
         self.console.print("Historial borrado.", style="ok")
@@ -609,6 +837,8 @@ _COMMAND_TABLE: Final[Mapping[str, CommandHandler]] = {
     "/resume": Session._cmd_resume,
     "/attach": Session._cmd_attach,
     "/forget": Session._cmd_forget,
+    "/next": Session._cmd_next,
+    "/policy": Session._cmd_policy,
     "/panic": Session._cmd_panic,
     "/kb": Session._cmd_kb,
     "/key": Session._cmd_key,
@@ -633,8 +863,9 @@ def repl(
     resume: str | None = None,
     attach: Sequence[str] = (),
     overrides: Mapping[str, str] | None = None,
+    supervise: str | None = None,
 ) -> int:
-    """Bucle interactivo (o un solo prompt con `once`) con limpieza garantizada."""
+    """Bucle interactivo, un solo prompt (`once`) o el lazo supervisor (`supervise`)."""
     _configure_stdio()
     # `Session` aplica el flag de comandos al cargar los ajustes: una sola decisión.
     resolved = context or RuntimeContext.detect(allow_commands=allow_commands)
@@ -650,6 +881,8 @@ def repl(
     print_banner(session.console, session.context, session.settings, session.listener_status)
     session.announce()
     try:
+        if supervise:
+            return _run_lazo(session, supervise)
         if once:
             return session.run_prompt(once)
         while True:
@@ -671,11 +904,22 @@ def repl(
         session.close()
 
 
+def _run_lazo(session: Session, goal: str) -> int:
+    """El lazo se corre aquí y no en `main` para que `session.close()` siempre limpié los procesos."""
+    outcome = session.run_supervised(goal)
+    session.report_supervised(outcome)
+    return outcome.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autonoma",
         description="Agente local autónomo: web, archivos y NoTrack.ai. Ctrl+C = cancelar.",
-        epilog="Sin TTY interactiva las operaciones locales se deniegan por diseño.",
+        epilog=(
+            "Sin TTY y sin --approval-policy las operaciones locales se deniegan por diseño.\n"
+            'Modo desatendido: autonoma --supervise --allow-commands --approval-policy approval.json "objetivo"\n'
+            "Interrumpir: Ctrl+C (o tocar pánico); desde otra terminal, toca el archivo supervisor/STOP."
+        ),
     )
     parser.add_argument("--doctor", action="store_true", help="diagnóstico local sin API, prompts ni listener")
     parser.add_argument("--json", action="store_true", help="salida JSON de --doctor y --selftest")
@@ -690,6 +934,54 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-commands",
         action="store_true",
         help="habilitar shell local con aprobación por comando (sin aislamiento)",
+    )
+    parser.add_argument(
+        "--supervise",
+        action="store_true",
+        help="lazo autónomo: encadena turnos sobre el objetivo hasta DONE/BLOCKED sin que pegues prompts",
+    )
+    parser.add_argument(
+        "--turns",
+        type=int,
+        default=None,
+        metavar="N",
+        help="cuántos turnos se persigue el objetivo (1-200; --supervise)",
+    )
+    parser.add_argument(
+        "--minutes",
+        type=float,
+        default=None,
+        metavar="N",
+        help="ventana de tiempo del lazo en minutos (1-1440; --supervise)",
+    )
+    parser.add_argument(
+        "--goal-file",
+        metavar="RUTA",
+        help="objetivo leído de un archivo (líneas que empiezan por # se ignoran)",
+    )
+    parser.add_argument(
+        "--approval-policy",
+        metavar="RUTA",
+        help="JSON con el alcance que el usuario delega en modo desatendido (allow-list por herramienta)",
+    )
+    parser.add_argument(
+        "--init-policy",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="RUTA",
+        help="escribir una plantilla de política de aprobación (por defecto approval.json) y salir",
+    )
+    parser.add_argument("--force", action="store_true", help="con --init-policy, reemplazar una política existente")
+    parser.add_argument(
+        "--allow-shell-commands",
+        action="store_true",
+        help="permitir que la política delegue `command` (texto interpretado por el shell), no sólo argv",
+    )
+    parser.add_argument(
+        "--keep-going-on-block",
+        action="store_true",
+        help="un BLOCKED no corta el lazo: se trata como turno sin avance",
     )
     parser.add_argument("--plain", action="store_true", help="texto simple, sin paneles ni animaciones")
     parser.add_argument("--reduced-motion", action="store_true", help="progreso estático")
@@ -727,6 +1019,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--doctor no admite prompts, --allow-commands ni --global-hotkey")
     if args.selftest and (args.prompt or args.allow_commands or args.global_hotkey):
         parser.error("--selftest no admite prompts, --allow-commands ni --global-hotkey")
+    if not args.supervise:
+        extra = [
+            flag
+            for flag, value in (
+                ("--turns", args.turns),
+                ("--minutes", args.minutes),
+                ("--goal-file", args.goal_file),
+                ("--keep-going-on-block", args.keep_going_on_block),
+            )
+            if value
+        ]
+        if extra:
+            parser.error(f"{' y '.join(extra)} requiere --supervise")
+    if args.force and args.init_policy is None:
+        parser.error("--force sólo acompaña a --init-policy")
+    if args.init_policy is not None and (args.doctor or args.selftest or args.supervise or args.prompt):
+        parser.error("--init-policy no se mezcla con prompts, --doctor, --selftest ni --supervise")
+    if args.supervise and not (" ".join(args.prompt).strip() or (args.goal_file or "").strip()):
+        parser.error("--supervise necesita un objetivo: un prompt o --goal-file RUTA")
     return args
 
 
@@ -782,6 +1093,26 @@ def maybe_pause_on_exit(args: argparse.Namespace, env: Mapping[str, str] | None 
         return
 
 
+def _emit_policy_template(args: argparse.Namespace, context: RuntimeContext) -> None:
+    """`--init-policy`: la plantilla la escribe el usuario desde la CLI, nunca el agente."""
+    raw = (args.init_policy or "").strip()
+    target = Path(raw).expanduser() if raw else context.root / "approval.json"
+    try:
+        written = write_policy_template(target, overwrite=bool(args.force))
+    except (AutonomaError, ValueError, OSError) as exc:
+        detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+        print(f"No se pudo escribir la plantilla: {safe_text(detail)}", file=sys.stderr)
+        raise SystemExit(int(ExitCode.CONFIGURATION)) from exc
+    print(f"plantilla de política escrita en {written}")
+    print(
+        "ajústala (rutas y comandos concretos) y arranca el lazo así: autonoma --supervise "
+        f'--allow-commands --approval-policy {written.name} "termina la tanda pendiente".\n'
+        'Para no repetirlo, fíjalo en config.json: "approval_policy": "'
+        f'{written.name}".'
+    )
+    raise SystemExit(int(ExitCode.SUCCESS))
+
+
 def main(argv: list[str] | None = None) -> None:
     """Punto de entrada del paquete y del ejecutable congelado."""
     args = parse_args(argv)
@@ -790,12 +1121,34 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(run_diagnostics(as_json=bool(args.json), data_root=context.data_root))
     if args.selftest:
         raise SystemExit(run_selftest(as_json=bool(args.json), data_root=context.data_root))
+    if args.init_policy is not None:
+        return _emit_policy_template(args, context)
     prompt = " ".join(args.prompt).strip() or None
     overrides: dict[str, str] = {}
     if args.no_persist:
         overrides["SESSION_PERSIST"] = "false"
     if args.max_steps is not None:
         overrides["MAX_TOOL_ITERATIONS"] = str(args.max_steps)
+    if args.approval_policy:
+        overrides["APPROVAL_POLICY"] = str(args.approval_policy)
+    if args.allow_shell_commands:
+        overrides["ALLOW_SHELL_COMMANDS"] = "true"
+    if args.turns is not None:
+        overrides["SUPERVISOR_MAX_TURNS"] = str(args.turns)
+    if args.minutes is not None:
+        overrides["SUPERVISOR_MAX_MINUTES"] = str(args.minutes)
+    if args.keep_going_on_block:
+        overrides["SUPERVISOR_STOP_ON_BLOCK"] = "false"
+    if args.goal_file:
+        overrides["SUPERVISOR_GOAL_FILE"] = str(args.goal_file)
+    supervise_goal: str | None = None
+    if args.supervise:
+        try:
+            supervise_goal = prompt or goal_from_file(Path(args.goal_file).expanduser())
+        except (AutonomaError, OSError, ValueError) as exc:
+            detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+            print(f"No se pudo leer el objetivo: {safe_text(detail)}", file=sys.stderr)
+            raise SystemExit(int(ExitCode.CONFIGURATION)) from exc
     try:
         code = repl(
             once=prompt,
@@ -805,6 +1158,7 @@ def main(argv: list[str] | None = None) -> None:
             resume=args.resume,
             attach=tuple(args.attach),
             overrides=overrides,
+            supervise=supervise_goal,
         )
     except (AutonomaError, ValueError, OSError) as exc:
         detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)

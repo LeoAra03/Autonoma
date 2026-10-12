@@ -55,6 +55,7 @@ class ExitCode(IntEnum):
     APPROVAL_REQUIRED = 5
     FILESYSTEM = 6
     SEARCH = 7
+    INCOMPLETE = 8
     CANCELLED = 130
 
 

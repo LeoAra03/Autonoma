@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from autonoma.approval import enforce_ceiling
 from autonoma.errors import ConfigurationError, ProcessLaunchError, ProcessTimeoutError
 from autonoma.key_handler import PanicController
 
@@ -293,18 +294,26 @@ def _is_windows() -> bool:
 
 
 def prepare_command(command: str | Sequence[str], *, shell: bool) -> str | list[str]:
-    """Normaliza el comando y rechaza lo que `subprocess` aceptaría de forma engañosa."""
+    """Normaliza el comando y rechaza lo que `subprocess` aceptaría de forma engañosa.
+
+    Aquí —y sólo aquí— se aplica el techo duro de seguridad: `run_command`, `spawn_command` y
+    cualquier llamador interno pasan por esta función, así que no existe forma de lanzar lo que
+    está cortado sin escribir otro motor. La política de aprobación decide el *alcance*; esto
+    decide lo que no es delegable ni aunque la política lo pida.
+    """
     if isinstance(command, str):
         if not command.strip():
             raise ProcessLaunchError("Comando vacío")
         if "\x00" in command:
             raise ProcessLaunchError("El comando no puede contener NUL")
+        enforce_ceiling(command)
         return command
     argv = [str(item) for item in command]
     if not argv:
         raise ProcessLaunchError("argv vacío")
     if any("\x00" in item for item in argv):
         raise ProcessLaunchError("argv no puede contener NUL")
+    enforce_ceiling(" ".join(argv))
     if shell:
         # `shell=True` con lista ejecuta sólo el primer elemento y descarta el resto:
         # entrada ambigua, no un comando. Se exige decisión explícita del llamador.

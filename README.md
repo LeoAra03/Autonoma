@@ -42,6 +42,9 @@ y la clave deja de ser obligatoria.
 
 Investigar en la web y leer páginas largas por partes, recorrer y **editar** archivos sin reescribirlos enteros,
 buscar en disco, dejar notas en `knowledge_base/`, lanzar procesos que siguen vivos en segundo plano y consultar su
-salida, y recordar la conversación entre ejecuciones (`--resume`, `/sessions`). Los límites son configurables sin
-dejar de ser límites: la aprobación humana (`SI`) sigue siendo obligatoria para cualquier escritura o comando, y no
-hay sandbox simulado. Detalle en [`autonoma-agent/README.md`](autonoma-agent/README.md).
+salida, y recordar la conversación entre ejecuciones (`--resume`, `/sessions`). Puede trabajar **solo** un rato:
+`npm run lazo -- --approval-policy approval.json "objetivo"` encadena turnos hasta terminar, con una allow-list que
+escribes tú y un presupuesto que corta el exceso. Los límites son configurables sin dejar de ser límites: la
+aprobación (`SI` propio o política delegada) sigue siendo obligatoria para cualquier escritura o comando, y no hay
+sandbox simulado. Detalle en [`autonoma-agent/README.md`](autonoma-agent/README.md) y en
+[INSTALAR § modo desatendido](INSTALL.md#5-dejarlo-correr-solo-modo-desatendido).

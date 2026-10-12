@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from autonoma import __version__
+from autonoma.approval import Budget, PolicyState, load_approval_policy
 from autonoma.cli import (
     _COMMAND_TABLE,
     HELP_TEXT,
@@ -31,6 +33,7 @@ from autonoma.cli import (
     should_pause_on_exit,
 )
 from autonoma.config import Settings
+from autonoma.diagnostics import collect_diagnostics
 from autonoma.errors import ConfigurationError, ExitCode
 from autonoma.key_handler import ListenerState, ListenerStatus
 from autonoma.observability import MetricsRegistry
@@ -815,3 +818,293 @@ def test_resume_alone_does_not_swallow_the_next_flag() -> None:
     args = parse_args(["--resume", "--plain"])
     assert args.resume == ""
     assert args.plain is True
+
+
+# ════════════════════════════ política delegada y lazo supervisor (CLI)
+class PolicyAgent(FakeAgent):
+    """Agente falso que sí trae lo que la sesión le pide cuando hay política: presupuesto e id."""
+
+    def __init__(self, *, answer: str = "respuesta", budget: Budget | None = None) -> None:
+        super().__init__(answer=answer)
+        self.policy_state = PolicyState(budget or Budget())
+        self.approval_policy: object | None = None
+        self.reloaded: list[object] = []
+
+    def set_approval_policy(self, policy: object) -> None:
+        self.approval_policy = policy
+        self.reloaded.append(policy)
+
+
+class ScriptAgent(FakeAgent):
+    """Respuestas en fila: el lazo consume un turno por elemento de la lista."""
+
+    def __init__(self, answers: list[str]) -> None:
+        super().__init__()
+        self._queue = list(answers)
+
+    def run(self, prompt: str, *, on_event=None) -> str:
+        self.prompts.append(prompt)
+        if on_event is not None:
+            on_event("tool", "read_file(path=nota.md)")
+        return self._queue.pop(0) if self._queue else "DONE: cola agotada"
+
+
+def write_policy(tmp_path: Path, payload: dict[str, object]) -> Path:
+    target = tmp_path / "approval.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    return target
+
+
+def test_la_politica_se_carga_antes_del_agente(made_session, tmp_path: Path) -> None:
+    write_policy(
+        tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"], "requires_approval": False}]}
+    )
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, _console, _runtime, _agent = made_session(agent=PolicyAgent(), settings=settings)
+    assert session.approval_policy is not None
+    assert session.approval_policy.enabled
+    assert session.approval_policy.roots == (tmp_path,)
+
+
+def test_una_politica_rota_es_un_error_de_arranque(made_session, tmp_path: Path) -> None:
+    (tmp_path / "approval.json").write_text("{ esto no es json", encoding="utf-8")
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    with pytest.raises(ConfigurationError):
+        made_session(agent=PolicyAgent(), settings=settings)
+
+
+def test_la_aprobacion_delegada_autoriza_sin_preguntar(made_session, monkeypatch, tmp_path: Path) -> None:
+    """El caso normal del modo desatendido: la allow-list resuelve y nadie teclea nada."""
+    write_policy(
+        tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"], "requires_approval": False}]}
+    )
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, console, _runtime, _agent = made_session(agent=PolicyAgent(), settings=settings)
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: False, raising=True)
+    assert session.approve("list_dir", {"path": str(tmp_path)}) is True
+    assert session.agent.policy_state.ops == 1
+    assert "autorizada por la política" in console.text
+
+
+def test_lo_que_no_esta_en_la_politica_se_niega_sin_gastar_tty(made_session, monkeypatch, tmp_path: Path) -> None:
+    write_policy(
+        tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"], "requires_approval": False}]}
+    )
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, console, _runtime, _agent = made_session(agent=PolicyAgent(), settings=settings)
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: False, raising=True)
+    assert session.approve("delete_path", {"path": str(tmp_path / "x")}) is False
+    assert "negada por la política" in console.text
+    assert session.agent.policy_state.denials == 1
+
+
+def test_la_politica_puede_exigir_un_SI_aunque_el_lazo_corra_sin_tty(made_session, monkeypatch, tmp_path: Path) -> None:
+    """Regla listada PERO con `requires_approval`: en desatendido se niega; en TTY se pregunta."""
+    write_policy(tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"]}]})
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, _console, _runtime, _agent = made_session(agent=PolicyAgent(), responses=["SI"], settings=settings)
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: False, raising=True)
+    assert session.approve("list_dir", {"path": str(tmp_path)}) is False
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: True, raising=True)
+    assert session.approve("list_dir", {"path": str(tmp_path)}) is True
+
+
+def test_sin_politica_no_hay_canal_delegado(made_session, monkeypatch) -> None:
+    session, console, _runtime, _agent = made_session()
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: False, raising=True)
+    assert session.approve("read_file", {"path": "x"}) is False
+    assert console.lines == []
+
+
+def test_la_tty_tambien_gasta_presupuesto_cuando_hay_politica(made_session, monkeypatch, tmp_path: Path) -> None:
+    write_policy(tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"]}]})
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, _console, _runtime, _agent = made_session(agent=PolicyAgent(), responses=["SI"], settings=settings)
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: True, raising=True)
+    assert session.approve("list_dir", {"path": str(tmp_path)}) is True
+    assert session.agent.policy_state.ops == 1
+
+
+def test_status_mostrar_la_politica_activa(made_session, tmp_path: Path) -> None:
+    write_policy(
+        tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"], "requires_approval": False}]}
+    )
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, console, _runtime, _agent = made_session(agent=PolicyAgent(), settings=settings)
+    session.status()
+    assert "política delegada" in console.text
+
+
+def test_policy_command_sin_politica_explica_como_activarla(made_session) -> None:
+    session, console, _runtime, _agent = made_session(agent=PolicyAgent())
+    assert session.handle_command("/policy") is True
+    assert "--approval-policy" in console.text
+
+
+def test_policy_command_recarga_y_protege_la_nueva_politica(made_session, tmp_path: Path) -> None:
+    first = write_policy(tmp_path, {"allow": [{"tool": "list_dir", "requires_approval": False}]})
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    agent = PolicyAgent()
+    session, console, _runtime, _fake = made_session(agent=agent, settings=settings)
+    otra = tmp_path / "otra-politica.json"
+    otra.write_text('{"allow": [{"tool": "read_file", "requires_approval": false}]}', encoding="utf-8")
+    assert session.handle_command(f"/policy {otra}") is True
+    assert session.approval_policy is not None and "read_file" in str(session.approval_policy.describe())
+    assert first.is_file()
+    assert "política activada" in console.text
+
+
+def test_policy_command_con_ruta_rota_no_deja_la_sesion_a_media(made_session, tmp_path: Path) -> None:
+    """Un `/policy` inválido se informa y se descarta: la sesión sigue con la política de siempre."""
+    write_policy(tmp_path, {"allow": [{"tool": "list_dir", "requires_approval": False}]})
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, approval_policy="approval.json")
+    session, console, _runtime, _agent = made_session(agent=PolicyAgent(), settings=settings)
+    antes = session.approval_policy
+    assert session.handle_command(f"/policy {tmp_path / 'no-existe.json'}") is True
+    assert "política inválida" in console.text
+    assert session.approval_policy is antes
+
+
+def test_run_supervised_encadena_turnos_y_deja_informe(made_session, tmp_path: Path) -> None:
+    agent = ScriptAgent(["paso 1\nNEXT: sigue con el paso 2", "paso 2\nDONE: los dos pasos hechos"])
+    session, console, _runtime, _fake = made_session(agent=agent)
+    outcome = session.run_supervised("terminar la tanda")
+    assert outcome.state == "done"
+    assert len(agent.prompts) == 2
+    assert "OBJETIVO SUPERVISADO" in agent.prompts[0]
+    informe = tmp_path / "supervisor" / "turns.jsonl"
+    assert informe.is_file()
+    assert json.loads(informe.read_text(encoding="utf-8"))["state"] == "done"
+    assert "lazo supervisor" in console.text
+
+
+def test_run_supervised_sin_politica_advierte_del_muro(made_session, monkeypatch) -> None:
+    monkeypatch.setattr("autonoma.cli.sys.stdin.isatty", lambda: False, raising=True)
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["DONE: ya"]))
+    session.run_supervised("objetivo")
+    assert "sin TTY y sin política" in console.text
+
+
+def test_run_supervised_anuncia_la_politica_y_los_topes(made_session, tmp_path: Path) -> None:
+    write_policy(
+        tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"], "requires_approval": False}]}
+    )
+    settings = Settings(
+        notrack_api_key="sk-probe-123456",
+        root_dir=tmp_path,
+        approval_policy="approval.json",
+        supervisor_max_turns=3,
+        supervisor_max_minutes=5.0,
+    )
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["DONE: fin"]), settings=settings)
+    session.run_supervised("objetivo")
+    assert "política delegada activa" in console.text
+    assert "3 turnos · 5 min" in console.text
+    assert "comandos deshabilitados" in console.text
+
+
+def test_sin_modelo_el_lazo_no_quema_turnos(made_session, tmp_path: Path) -> None:
+    """Un lazo que arranca sin clave se detiene en seco y lo dice, en lugar de reintentar 12 veces."""
+    agent = ScriptAgent(["DONE: imposible"])
+    agent.notrack = SimpleNamespace(configured=False)
+    session, console, _runtime, _fake = made_session(agent=agent)
+    outcome = session.run_supervised("objetivo")
+    assert outcome.state == "blocked"
+    assert outcome.exit_code == int(ExitCode.INCOMPLETE)
+    assert "no hay modelo configurado" in console.text
+    assert agent.prompts == []
+    informe = tmp_path / "supervisor" / "turns.jsonl"
+    assert json.loads(informe.read_text(encoding="utf-8"))["stopped_by"] == "modelo sin configurar"
+
+
+def test_report_supervised_cierra_con_resumen(made_session) -> None:
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["BLOCKED: falta la clave de acceso"]))
+    outcome = session.run_supervised("objetivo")
+    session.report_supervised(outcome)
+    assert "bloqueado" in console.text
+    assert "falta la clave" in console.text
+
+
+def test_next_toma_el_paso_pendiente_del_ultimo_turno(made_session) -> None:
+    agent = ScriptAgent(["análisis\nNEXT: aplicar el parche", "DONE: parche aplicado"])
+    session, _console, _runtime, _fake = made_session(agent=agent)
+    assert session.handle_command("/next arreglar la puerta") is True
+    assert "arreglar la puerta" in agent.prompts[-1]
+    assert "OBJETIVO SUPERVISADO" in agent.prompts[-1]
+    session.handle_command("/next")
+    assert "aplicar el parche" in agent.prompts[-1]  # reutiliza el NEXT declarado
+    assert "arreglar la puerta" in agent.prompts[-1]  # y recuerda el objetivo
+
+
+def test_next_sin_objetivo_previo_no_inv_enta_un_turno(made_session) -> None:
+    agent = ScriptAgent(["nada"])
+    session, console, _runtime, _fake = made_session(agent=agent)
+    assert session.handle_command("/next") is True
+    assert "no hay objetivo pendiente" in console.text
+    assert agent.prompts == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--supervise"],
+        ["--turns", "4"],
+        ["--minutes", "5"],
+        ["--goal-file", "objetivo.md"],
+        ["--keep-going-on-block"],
+        ["--force"],
+        ["--init-policy", "--doctor"],
+        ["--supervise", "--allow-commands", "--doctor"],
+    ],
+)
+def test_las_banderas_del_lazo_se_validan(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as boom:
+        parse_args(argv)
+    assert boom.value.code == 2
+
+
+def test_supervise_acepta_objetivo_y_banderas_asociadas() -> None:
+    args = parse_args(["--supervise", "--allow-commands", "--turns", "4", "--approval-policy", "a.json", "termina"])
+    assert args.supervise is True and args.turns == 4 and args.approval_policy == "a.json"
+    assert args.prompt == ["termina"]
+
+
+def test_init_policy_escribe_plantilla_valida_y_no_la_pisa(tmp_path: Path, monkeypatch, capsys) -> None:
+    for name in ("src", "docs", "tests"):
+        (tmp_path / name).mkdir()
+    del monkeypatch
+    with pytest.raises(SystemExit) as first:
+        main(["--init-policy", "--data-dir", str(tmp_path)])
+    assert first.value.code == 0
+    written = tmp_path / "approval.json"
+    assert written.is_file()
+    policy = load_approval_policy(written, default_root=tmp_path)
+    assert policy.enabled and policy.budget.max_deletes == 2
+    assert any(rule.tools == frozenset({"delete_path"}) for rule in policy.deny)
+    with pytest.raises(SystemExit) as segunda:
+        main(["--init-policy", "--data-dir", str(tmp_path)])
+    assert segunda.value.code == int(ExitCode.CONFIGURATION)
+    with pytest.raises(SystemExit) as tercera:
+        main(["--init-policy", "--force", "--data-dir", str(tmp_path)])
+    assert tercera.value.code == 0
+    assert "plantilla de política escrita" in capsys.readouterr().out
+
+
+def test_doctor_informa_de_la_politica_y_del_lazo(tmp_path: Path) -> None:
+    write_policy(
+        tmp_path, {"roots": ["."], "allow": [{"tool": "list_dir", "paths": ["**"], "requires_approval": False}]}
+    )
+    (tmp_path / "config.json").write_text(json.dumps({"approval_policy": "approval.json"}), encoding="utf-8")
+    report = collect_diagnostics(data_root=tmp_path)
+    names = {check.name for check in report.checks}
+    assert {"approval_policy", "supervisor"} <= names
+    policy_check = next(check for check in report.checks if check.name == "approval_policy")
+    assert "1 reglas allow" in policy_check.message or "reglas allow" in policy_check.message
+
+
+def test_doctor_marca_una_politica_rota(tmp_path: Path) -> None:
+    (tmp_path / "approval.json").write_text('{"version": 7}', encoding="utf-8")
+    (tmp_path / "config.json").write_text(json.dumps({"approval_policy": "approval.json"}), encoding="utf-8")
+    report = collect_diagnostics(data_root=tmp_path)
+    policy_check = next(check for check in report.checks if check.name == "approval_policy")
+    assert policy_check.status.value == "error"

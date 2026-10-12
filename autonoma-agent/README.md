@@ -174,11 +174,17 @@ resultados 1–20, páginas precargadas 0–5, ventana de lectura 1 000–400 00
 100 000–16 000 000 bytes y texto devuelto por `fetch_url` 1 000–200 000 caracteres.
 También se aceptan `MAX_TOOL_ITERATIONS`, `MAX_TOOL_CALLS_PER_TURN`, `MAX_PARALLEL_TOOL_CALLS`, `MAX_HISTORY_MESSAGES`,
 `HTTP_TIMEOUT`, `COMMAND_TIMEOUT`, `SEARCH_RESULTS`, `FETCH_PAGES`, `READ_LIMIT_CHARS`, `FETCH_CHAR_LIMIT`,
-`PAGE_MAX_BYTES`, `KNOWLEDGE_DIR`, `LOG_DIR`, `SESSIONS_DIR`, `JOBS_DIR`, `NOTRACK_BASE_URL`, `NOTRACK_MODEL` y las dos
-API keys. Dos interruptores de seguridad tienen nombre propio: `SESSION_PERSIST` (por defecto `true`; si se apaga, nada
-queda en disco) y `ALLOW_PRIVATE_NETWORK` (por defecto `false`; si se enciende, `fetch_url` y la investigación pueden
-dirigirse a la red local, lo que abre el paso a metadatos de nubes y servicios internos — úsalo sólo a sabiendas).
-Configuraciones numéricas o JSON inválidas producen un error explícito.
+`PAGE_MAX_BYTES`, `KNOWLEDGE_DIR`, `LOG_DIR`, `SESSIONS_DIR`, `JOBS_DIR`, `SUPERVISOR_DIR`, `NOTRACK_BASE_URL`,
+`NOTRACK_MODEL`, `APPROVAL_POLICY`, `SYSTEM_PROMPT_FILE`, `SUPERVISOR_GOAL_FILE`, `SUPERVISOR_MAX_TURNS` (1-200),
+`SUPERVISOR_MAX_MINUTES` (1-1440), `SUPERVISOR_IDLE_SECONDS`, `SUPERVISOR_STOP_ON_BLOCK`, `APPROVAL_POLICY_MAX_BYTES`
+(1 KiB-1 MiB) y las dos API keys. Cuatro interruptores de seguridad tienen nombre propio: `SESSION_PERSIST` (por
+defecto `true`; si se apaga, nada queda en disco), `ALLOW_PRIVATE_NETWORK` (por defecto `false`; si se enciende,
+`fetch_url` y la investigación pueden dirigirse a la red local, lo que abre el paso a metadatos de nubes y servicios
+internos — úsalo sólo a sabiendas), `ALLOW_SHELL_COMMANDS` (por defecto `false`; la política delegada autoriza `argv`
+—programa y argumentos literales—, y sólo con este flag puede autorizar `command`, que es una línea que interpreta un
+shell) y `SUPERVISOR_STOP_ON_BLOCK` (por defecto `true`; un `BLOCKED` corta el lazo en lugar de seguir reintentando).
+Configuraciones numéricas o JSON inválidas producen un error explícito, incluida una `APPROVAL_POLICY` mal escrita:
+una política rota nunca se ignora en silencio.
 
 En un checkout, notas/logs/configuración están en este directorio; en PyInstaller, junto al ejecutable.
 `--data-dir RUTA` tiene prioridad sobre `AUTONOMA_HOME` durante la ejecución.
@@ -196,6 +202,8 @@ sola un código de salida no cero.
 - `knowledge.py`: almacenamiento de notas, archivos exclusivos con UUID y lecturas limitadas.
 - `presentation.py`: diff local y representación visible de controles de terminal.
 - `filesystem.py`: CRUD protegido y procesos con salida limitada.
+- `approval.py`: política de aprobación delegada (allow-list, presupuesto por turno y techo duro de comandos).
+- `supervisor.py`: lazo `--supervise` — protocolo `NEXT`/`DONE`/`BLOCKED`, topes e interrupción humana.
 - `network.py`: política de destinos web.
 - `search_engine.py`: búsqueda y extracción; mantiene una fachada compatible heredando el almacén de notas.
 - `notrack_client.py`: API compatible con OpenAI.

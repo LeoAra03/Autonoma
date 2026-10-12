@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,14 +35,20 @@ def test_package_json_declares_a_usable_command_surface() -> None:
     assert int(manifest["engines"]["node"].lstrip(">=")) >= 18  # node <18 no trae `--experimental` nada útil
 
 
+_NPM_RUN = re.compile(r"^npm run (?P<script>[A-Za-z0-9_-]+)(?:\s|$)")
+
+
 def test_documented_npm_commands_all_exist() -> None:
     """`INSTALL.md` promete atajos: cada `npm run x` escrito debe existir de verdad."""
     manifest = json.loads(_read(REPO_ROOT / "package.json"))
     documented = set()
     for line in _read(REPO_ROOT / "INSTALL.md").splitlines():
         for token in line.split("`"):
-            if token.startswith("npm run "):
-                documented.add(token.split()[-1])
+            # Un comando documentado puede traer argumentos (`npm run lazo -- --turns 4 "objetivo"`):
+            # lo que se verifica es el NOMBRE del script, no el resto de la línea.
+            match = _NPM_RUN.match(token.strip())
+            if match is not None:
+                documented.add(match.group("script"))
     assert documented, "el documento de instalación perdió su tabla de comandos"
     assert documented <= set(manifest["scripts"]), sorted(documented - set(manifest["scripts"]))
 

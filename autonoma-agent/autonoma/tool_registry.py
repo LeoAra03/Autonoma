@@ -31,6 +31,14 @@ _LIST_NOTES_LIMIT: Final[int] = 50
 _EMPTY_KB_MESSAGE: Final[str] = "knowledge_base vacía"
 
 
+def _command_payload(args: Mapping[str, Any]) -> str | list[str]:
+    """`argv` si la llamada la trae; si no, el texto de `command`. Nunca ambos (lo valida el contrato)."""
+    argv = args.get("argv")
+    if argv is not None:
+        return [str(item) for item in argv]
+    return str(args.get("command") or "")
+
+
 def note_title(url: str) -> str:
     """Título de nota a partir del destino, sin convertir la URL en algo ilegible."""
     from urllib.parse import urlsplit
@@ -69,6 +77,7 @@ class ToolRegistry:
             "save_knowledge": self._save,
             "read_knowledge": self._read,
             "list_knowledge": self._list,
+            "run_command": self._run_command,
             "spawn_command": self._spawn_job,
             "job_status": self._job_status,
             "job_output": self._job_output,
@@ -147,8 +156,28 @@ class ToolRegistry:
 
     def _spawn_job(self, name: str, args: Mapping[str, Any], prompt: str) -> str:
         raw_cwd = args.get("cwd")
-        info = self._runner().spawn(str(args["command"]), str(raw_cwd) if raw_cwd else None)
+        info = self._runner().spawn(_command_payload(args), str(raw_cwd) if raw_cwd else None)
         return str(info.summary())
+
+    def _run_command(self, name: str, args: Mapping[str, Any], prompt: str) -> str:
+        """`run_command` con dos caras: `argv` ejecuta directo, `command` pasa por el shell.
+
+        La distinción importa porque la autorización es sobre otra cosa: con `argv` lo aprobado es
+        exactamente lo que se ejecuta; con `command` lo aprobado es una línea que interpreta `sh` o
+        `cmd.exe`. Por eso la política sólo autoriza la forma textual si se lo pide explícitamente.
+        """
+        payload = _command_payload(args)
+        raw_cwd = args.get("cwd")
+        raw_timeout = args.get("timeout")
+        result = self.fs.run_command(
+            payload,
+            cwd=str(raw_cwd) if raw_cwd else None,
+            timeout=float(raw_timeout)
+            if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool)
+            else None,
+            shell=isinstance(payload, str),
+        )
+        return result.format_for_model() if isinstance(result, CommandResult) else str(result)
 
     def _job_status(self, name: str, args: Mapping[str, Any], prompt: str) -> str:
         raw = args.get("job_id")

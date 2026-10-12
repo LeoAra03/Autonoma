@@ -15,6 +15,7 @@ import contextlib
 import os
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -97,10 +98,14 @@ class JobRunner:
     def active_count(self) -> int:
         return sum(1 for job in self._jobs.values() if job.process.poll() is None)
 
-    def spawn(self, command: str, cwd: str | None = None) -> JobInfo:
-        """Lanza y desengancha: devuelve la ficha al instante, no el resultado."""
+    def spawn(self, command: str | Sequence[str], cwd: str | None = None) -> JobInfo:
+        """Lanza y desengancha: devuelve la ficha al instante, no el resultado.
+
+        Con texto se pasa por el shell (pipes y comillas valen); con lista se ejecuta el programa
+        tal cual, que es lo que quiere una política de aprobación: nada interpretado por detrás.
+        """
         self.panic.check()
-        argv = prepare_command(command, shell=True)
+        argv = prepare_command(command, shell=isinstance(command, str))
         self._ensure_capacity()
         working = self._resolve_cwd(cwd)
         log_path = self._next_log_path()
@@ -192,9 +197,9 @@ class JobRunner:
             "stdout": handle,
             "stderr": subprocess.STDOUT,
             "stdin": subprocess.DEVNULL,
-            # `shell=True` con un único string: el mismo compromiso de `run_command`, para que
-            # pipes y comillas significuen lo mismo en primer y segundo plano.
-            "shell": True,
+            # `shell=True` sólo con un único string: el mismo compromiso de `run_command`. Con
+            # lista no hay shell, así que argv y ejecución coinciden literalmente.
+            "shell": isinstance(argv, str),
             "text": True,
             "encoding": "utf-8-sig",
             "errors": "replace",

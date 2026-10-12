@@ -8,7 +8,7 @@ se tipa contra `ConsolePort`/`Approver`, lo que permite probarla con dobles lige
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, runtime_checkable
@@ -109,7 +109,7 @@ class JobsPort(Protocol):
     @property
     def active_count(self) -> int: ...
 
-    def spawn(self, command: str, cwd: str | None = None) -> Any: ...
+    def spawn(self, command: str | Sequence[str], cwd: str | None = None) -> Any: ...
 
     def status(self, job_id: str | None = None) -> str: ...
 
