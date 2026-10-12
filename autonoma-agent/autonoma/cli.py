@@ -149,7 +149,13 @@ def _configure_stdio() -> None:
 
 def banner_body(settings: Settings, status: ListenerStatus) -> str:
     """Texto del banner: estado de la clave y del listener, sin cifras técnicas."""
-    key_line = "NoTrack: clave configurada" if settings.has_notrack_key else "NoTrack: FALTA NOTRACK_API_KEY  →  /key"
+    if settings.has_notrack_key:
+        source = "credenciales.txt" if settings.personal_status.value == "ok" and settings.personal_file else ".env"
+        key_line = f"NoTrack: clave configurada ({source})"
+        if settings.has_ndus:
+            key_line += " · NDUS listo"
+    else:
+        key_line = "NoTrack: FALTA NOTRACK_API_KEY  →  ponla en credenciales.txt o /key"
     return f"{BANNER}\n{key_line}\n{status.describe()}\nEscribe un prompt o /help"
 
 
@@ -497,10 +503,24 @@ class Session:
 
     # ------------------------------------------------------------------ estado
     def status(self) -> None:
+        personal = self.settings.personal_file or "credenciales.txt (no encontrado)"
+        ndus_line = "sí" if self.settings.has_ndus else "no (opcional)"
+        # Indicar de dónde vino la clave
+        if self.settings.has_notrack_key:
+            if self.settings.personal_status.value == "ok" and self.settings.personal_file:
+                key_src = f"sí ({self.settings.personal_file})"
+            elif self.settings.dotenv_status.value == "ok":
+                key_src = "sí (.env)"
+            else:
+                key_src = "sí"
+        else:
+            key_src = "NO → ponla en credenciales.txt o .env"
         lines = [
-            f"NoTrack key : {'sí' if self.settings.has_notrack_key else 'NO'}",
+            f"NoTrack key : {key_src}",
             f"NoTrack URL : {self.settings.notrack_base_url}",
             f"Modelo      : {self.settings.notrack_model}",
+            f"NDUS cookie : {ndus_line}",
+            f"personal    : {personal} [{self.settings.personal_status.value}]",
             f"shell local : {'habilitado, sin aislamiento' if self.settings.allow_commands else 'deshabilitado'}",
             f"aprobación  : {self._approval_mode()}",
             f"lazo        : {self.settings.supervisor_max_turns} turnos / {self.settings.supervisor_max_minutes:g} min",

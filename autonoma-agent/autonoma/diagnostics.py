@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 from autonoma._version import __version__
 from autonoma.approval import load_approval_policy
-from autonoma.config import Settings, load_settings, project_root
+from autonoma.config import DotEnvStatus, Settings, load_settings, project_root
 from autonoma.errors import AutonomaError, ConfigurationError
 from autonoma.notrack_client import is_loopback_host
 from autonoma.presentation import safe_text
@@ -259,9 +259,19 @@ def _configuration_checks(data_root: DataRoot | Path | None = None) -> Sequence[
         )
         key_status = CheckStatus.OK
     else:
-        key_detail = "Falta clave; configura /key antes de conversar."
+        key_detail = "Falta clave; ponla en credenciales.txt (o .env) o usa /key. Acepta también mis_claves.txt/personal.txt."
         key_status = CheckStatus.WARNING
     checks.append(Check("notrack_key", key_status, key_detail))
+    # Fichero personal y NDUS — informativo, nunca error bloqueante
+    if settings.personal_status == DotEnvStatus.OK:
+        ndus_detail = "NDUS presente" if settings.has_ndus else "sin NDUS (opcional)"
+        checks.append(Check("personal_file", CheckStatus.OK, f"{safe_text(settings.personal_file)}: {ndus_detail}."))
+    elif settings.personal_status == DotEnvStatus.MALFORMED:
+        checks.append(Check("personal_file", CheckStatus.WARNING, f"{safe_text(settings.personal_file)}: no se reconoció ninguna clave (revisa formato CLAVE=valor)."))
+    elif settings.personal_file:
+        checks.append(Check("personal_file", CheckStatus.WARNING, f"{safe_text(settings.personal_file)}: no existe o no legible (crea credenciales.txt con la plantilla)."))
+    else:
+        checks.append(Check("personal_file", CheckStatus.OK, "Sin fichero personal; usa .env o credenciales.txt si lo necesitas (plantilla disponible)."))
     checks.append(
         Check(
             "memory",

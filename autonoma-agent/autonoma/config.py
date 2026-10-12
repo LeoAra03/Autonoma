@@ -11,6 +11,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
@@ -28,12 +29,15 @@ __all__ = [
     "DotEnvFile",
     "DotEnvStatus",
     "NumericBound",
+    "PersonalFile",
     "Settings",
     "context_for",
     "dump_public_config",
+    "find_personal_file",
     "load_settings",
     "project_root",
     "read_dotenv_file",
+    "read_personal_file",
     "save_api_keys",
 ]
 
@@ -44,6 +48,36 @@ _MAX_DOTENV_CHARS: Final[int] = 262_144
 _VALID_KEY_CHARS: Final[frozenset[str]] = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 _DOTENV_FORBIDDEN_VALUE_CHARS: Final[str] = "\r\n\x00"
 _MIN_SECRET_SCAN_LENGTH: Final[int] = 6
+_PLACEHOLDERS: Final[frozenset[str]] = frozenset(
+    {
+        "",
+        "sk-notrack-pega-aqui-tu-clave",
+        "sk-notrack-pega-aqui-tu-clave-de-notrack",
+        "pega-aqui",
+        "pega-aqui-tu-clave",
+        "pega-aqui-tu-clave-de-notrack",
+        "pega-aqui-tu-ndus",
+        "pega-aqui-tu-cookie-ndus-si-la-usas",
+        "tu-clave",
+        "tu-ndus",
+    }
+)
+# Fichero personal del usuario: texto libre con claves, cookies, etc. — nunca se sube a git.
+_MAX_PERSONAL_CHARS: Final[int] = 262_144
+_PERSONAL_FILENAMES: Final[tuple[str, ...]] = (
+    "credenciales.txt",
+    "mis_claves.txt",
+    "claves.txt",
+    "personal.txt",
+    "keys.txt",
+    "NDUS.txt",
+)
+_PERSONAL_ENV_VARS: Final[tuple[str, ...]] = (
+    "AUTONOMA_CREDENTIALS_FILE",
+    "AUTONOMA_PERSONAL_FILE",
+    "CREDENCIALES_FILE",
+    "PERSONAL_FILE",
+)
 
 
 class DotEnvStatus(str, Enum):
@@ -67,6 +101,15 @@ class DotEnvFile:
     @property
     def is_present(self) -> bool:
         return self.status is not DotEnvStatus.MISSING
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalFile:
+    """Resultado de leer el txt personal (credenciales.txt, mis_claves.txt, etc.)."""
+
+    path: Path | None
+    values: Mapping[str, str]
+    status: DotEnvStatus = DotEnvStatus.MISSING
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +188,8 @@ class Settings:
     notrack_base_url: str = DEFAULT_NOTRACK_BASE_URL
     notrack_model: str = DEFAULT_NOTRACK_MODEL
     brave_api_key: str = ""
+    #: Cookie personal NDUS (Amazon u otro servicio) guardada en el txt personal — opcional.
+    ndus: str = ""
     knowledge_dir: str = ""
     sessions_dir: str = ""
     jobs_dir: str = ""
@@ -172,6 +217,9 @@ class Settings:
     root_dir: Path | None = None
     declared_keys: tuple[str, ...] = ()
     dotenv_status: DotEnvStatus = DotEnvStatus.MISSING
+    #: Fichero personal detectado (credenciales.txt / mis_claves.txt) y su estado.
+    personal_file: str = ""
+    personal_status: DotEnvStatus = DotEnvStatus.MISSING
 
     # ------------------------------------------------------------- derivados
     @property
@@ -218,7 +266,7 @@ class Settings:
 
     @property
     def has_notrack_key(self) -> bool:
-        return bool(self.notrack_api_key.strip())
+        return _is_real_key(self.notrack_api_key)
 
     @property
     def can_talk_to_model(self) -> bool:
@@ -227,14 +275,18 @@ class Settings:
 
     @property
     def has_brave_key(self) -> bool:
-        return bool(self.brave_api_key.strip())
+        return _is_real_key(self.brave_api_key)
+
+    @property
+    def has_ndus(self) -> bool:
+        return _is_real_key(self.ndus)
 
     @property
     def secret_values(self) -> tuple[str, ...]:
         """Secretos activos que el filtro de logs debe censurar."""
         return tuple(
             value.strip()
-            for value in (self.notrack_api_key, self.brave_api_key)
+            for value in (self.notrack_api_key, self.brave_api_key, self.ndus)
             if len(value.strip()) >= _MIN_SECRET_SCAN_LENGTH
         )
 
@@ -300,8 +352,189 @@ def read_dotenv_file(path: Path) -> DotEnvFile:
     return DotEnvFile(path=path, values=values, status=status, malformed_keys=tuple(malformed))
 
 
+# ------------------------------------------------------------------- fichero personal
+def _normalize_personal_key(raw: str) -> str:
+    return raw.strip().upper().replace("-", "_").replace(" ", "_").replace(".", "_")
+
+
+def _extract_ndus(value: str) -> str | None:
+    """Extrae `ndus=...` de una cadena tipo Cookie, o None si no hay patrón."""
+    text = value.strip()
+    match = re.search(r"ndus\s*=\s*([^;,\s\"']+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip("\"'")
+    return None
+
+
+def read_personal_file(path: Path) -> dict[str, str]:
+    """Lee un txt personal tolerante: `CLAVE=valor`, `Cookie: ndus=...`, o líneas sueltas.
+
+    - Ignora vacías y comentarios (`#`, `;`, `//`).
+    - Acepta `=` o `:` como separador.
+    - Normaliza alias comunes a claves canónicas (`API_KEY` → `NOTRACK_API_KEY`).
+    - Si una línea contiene `ndus=...` sin clave explícita, se guarda como `NDUS`.
+    - Si una línea suelta parece una clave larga, se asigna a `NOTRACK_API_KEY` si aún falta.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")[:_MAX_PERSONAL_CHARS]
+    except OSError as exc:
+        raise ConfigurationError(
+            f"No se pudo leer {path.name}; revisa permisos",
+            context={"error": type(exc).__name__},
+        ) from exc
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";") or line.startswith("//"):
+            continue
+        # Extracción prioritaria de NDUS si la línea es tipo Cookie: ndus=...  o NDUS=...
+        # Esto evita que `Cookie: ndus=ABC` se parta por `=` en `COOKIE:_NDUS`
+        if "ndus=" in line.lower():
+            extracted = _extract_ndus(line)
+            if extracted:
+                # Guardar NDUS siempre
+                values["NDUS"] = extracted
+                low = line.lower().strip()
+                # Si la línea es principalmente una cookie/ndus, ya está procesada
+                if low.startswith("cookie") or low.startswith("ndus") or low.startswith("ndus_cookie") or "cookie:" in low:
+                    continue
+                # Si la línea parece ser `NDUS=valor` pura (clave simple), también continuar
+                # para no reprocesarla como genérica
+                if "=" in line:
+                    first = line.split("=", 1)[0].strip().lower().replace("-", "_").replace(" ", "_")
+                    if first in {"ndus", "cookie", "cookie_ndus", "amazon_ndus", "ndus_cookie"}:
+                        continue
+        if "=" in line or ":" in line:
+            if "=" in line:
+                key_raw, _, val_raw = line.partition("=")
+            else:
+                key_raw, _, val_raw = line.partition(":")
+            key = key_raw.strip().strip("\"'").strip()
+            val = val_raw.strip().strip("\"'").strip()
+            if not key:
+                ndus = _extract_ndus(line)
+                if ndus:
+                    values["NDUS"] = ndus
+                elif len(val) >= 20 and " " not in val and "NOTRACK_API_KEY" not in values:
+                    values["NOTRACK_API_KEY"] = val
+                continue
+            norm = _normalize_personal_key(key)
+            if norm in {"NOTRACK_API_KEY", "NOTRACK_KEY", "API_KEY", "SK_NOTRACK", "NOTRACK", "APIKEY"}:
+                values["NOTRACK_API_KEY"] = _unquote(val)
+            elif norm in {"BRAVE_API_KEY", "BRAVE_KEY"}:
+                values["BRAVE_API_KEY"] = _unquote(val)
+            elif norm in {"NOTRACK_BASE_URL", "BASE_URL", "API_URL", "NOTRACK_URL"}:
+                values["NOTRACK_BASE_URL"] = _unquote(val)
+            elif norm in {"NOTRACK_MODEL", "MODEL", "NOTRACK_MODELO"}:
+                values["NOTRACK_MODEL"] = _unquote(val)
+            elif norm in {"NDUS", "COOKIE_NDUS", "AMAZON_NDUS", "AMZ_NDUS", "NDUS_COOKIE", "COOKIE"}:
+                extracted = _extract_ndus(val)
+                if extracted:
+                    values["NDUS"] = extracted
+                elif norm == "COOKIE" and "ndus=" in val.lower():
+                    extracted2 = _extract_ndus(val)
+                    values["NDUS"] = extracted2 or _unquote(val)
+                else:
+                    values["NDUS"] = _unquote(val)
+            else:
+                values[norm] = _unquote(val)
+            continue
+        if "ndus=" in line.lower():
+            ndus = _extract_ndus(line)
+            if ndus:
+                values["NDUS"] = ndus
+                continue
+        if len(line) >= 24 and " " not in line and "\t" not in line:
+            if ";" not in line and "," not in line:
+                if "NOTRACK_API_KEY" not in values:
+                    if line.startswith("sk-") or line.startswith("nt-") or len(line) >= 30:
+                        values["NOTRACK_API_KEY"] = line.strip("\"'")
+                        continue
+                if "NDUS" not in values and len(line) >= 40:
+                    values["NDUS"] = line.strip("\"'")
+                    continue
+    return values
+
+
+def find_personal_file(base_dir: Path, env: Mapping[str, str] | None = None) -> Path | None:
+    """Busca el txt personal en orden de prioridad. Devuelve la primera ruta existente o la forzada por env."""
+    source = env if env is not None else os.environ
+    for var in _PERSONAL_ENV_VARS:
+        raw = (source.get(var) or "").strip()
+        if raw:
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                candidate = (base_dir / candidate).resolve()
+            else:
+                candidate = candidate.resolve()
+            return candidate
+    search_dirs: list[Path] = []
+    try:
+        resolved_base = base_dir.resolve()
+    except OSError:
+        resolved_base = base_dir
+    search_dirs.append(resolved_base)
+    try:
+        parent = resolved_base.parent.resolve()
+        if parent != resolved_base:
+            search_dirs.append(parent)
+    except OSError:
+        pass
+    try:
+        cwd = Path.cwd().resolve()
+        if cwd not in search_dirs:
+            search_dirs.append(cwd)
+    except OSError:
+        pass
+    try:
+        home_cfg = Path.home() / ".config" / "autonoma"
+        if home_cfg not in search_dirs:
+            search_dirs.append(home_cfg)
+    except OSError:
+        pass
+    for directory in search_dirs:
+        for name in _PERSONAL_FILENAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def personal_file_payload(
+    path: Path | None, *, env: Mapping[str, str] | None = None
+) -> tuple[dict[str, str], DotEnvStatus, str]:
+    """Lee el personal si existe; devuelve (valores, estado, ruta_str)."""
+    if path is None:
+        return {}, DotEnvStatus.MISSING, ""
+    if not path.is_file():
+        return {}, DotEnvStatus.MISSING, str(path)
+    try:
+        values = read_personal_file(path)
+    except ConfigurationError:
+        return {}, DotEnvStatus.UNREADABLE, str(path)
+    try:
+        size = path.stat().st_size
+        if size > 0 and not values:
+            return values, DotEnvStatus.MALFORMED, str(path)
+    except OSError:
+        pass
+    return values, DotEnvStatus.OK, str(path)
+
+
 def _is_valid_key(key: str) -> bool:
     return bool(key) and not key[0].isdigit() and all(char in _VALID_KEY_CHARS for char in key)
+
+
+def _is_real_key(value: str) -> bool:
+    """Placeholder como `pega-aqui` no cuenta como clave real."""
+    text = (value or "").strip()
+    if not text or text in _PLACEHOLDERS:
+        return False
+    if "pega-aqui" in text.lower():
+        return False
+    return True
 
 
 def _unquote(value: str) -> str:
@@ -404,18 +637,28 @@ def load_settings(
     data_root: DataRootLike | None = None,
     env: Mapping[str, str] | None = None,
     ensure_dirs: bool = True,
+    personal_path: Path | None = None,
 ) -> Settings:
     """Compone la configuración sin efectos sobre el entorno del proceso.
 
     `overrides` inyecta valores ya validados (p. ej. una clave recién guardada con
     `/key`) sin mutar `os.environ`: el estado global deja de ser un canal oculto
     entre la UI y la carga de ajustes.
+
+    Prioridad: env > .env > txt personal (credenciales.txt/mis_claves.txt) > config.json > defecto.
+    El txt personal es para uso personal rápido: pega tu NOTRACK_API_KEY y tu NDUS en
+    `credenciales.txt` y el agente lo lee sin tocar `.env` ni variables.
     """
     root = (
         _coerce_data_root(data_root) if data_root is not None else resolve_data_root(os.environ if env is None else env)
     )
     base_dir = root.path
     dotenv = read_dotenv_file(env_path or base_dir / ".env")
+    # Txt personal: búsqueda automática si no se forzó una ruta
+    _personal_candidate = personal_path if personal_path is not None else find_personal_file(base_dir, env if env is not None else os.environ)
+    personal_values, personal_status, personal_resolved = personal_file_payload(_personal_candidate)
+    # También buscar personal en data_root explícito si personal_path era None y no se encontró
+    # personal_values ya incluye alias mapeados a canónicas
     json_values = load_json_config(config_path or base_dir / "config.json")
     process_env: dict[str, str] = dict(os.environ) if env is None else dict(env)
     if overrides:
@@ -428,17 +671,34 @@ def load_settings(
         from_dotenv = dotenv.values.get(env_key)
         if from_dotenv:
             return from_dotenv
+        from_personal = personal_values.get(env_key)
+        if from_personal:
+            return from_personal
         return _normalize_json_value(json_values[json_key]) if json_key in json_values else default
 
     numerics: dict[str, int | float] = {
         bound.name: bound.coerce(pick(bound.env_key, bound.name, repr(bound.default))) for bound in NUMERIC_BOUNDS
     }
+    # NDUS tiene su propio pick (sólo personal/env/dotenv, no json)
+    ndus_value = (
+        process_env.get("NDUS")
+        or dotenv.values.get("NDUS")
+        or personal_values.get("NDUS")
+        or _normalize_json_value(json_values.get("ndus", ""))  # type: ignore[arg-type]
+        or ""
+    )
+    def _sanitize_key(value: str) -> str:
+        text = (value or "").strip()
+        if not text or text in _PLACEHOLDERS or "pega-aqui" in text.lower():
+            return ""
+        return text
     settings = Settings(
-        notrack_api_key=pick("NOTRACK_API_KEY", "notrack_api_key"),
+        notrack_api_key=_sanitize_key(pick("NOTRACK_API_KEY", "notrack_api_key")),
         notrack_base_url=pick("NOTRACK_BASE_URL", "notrack_base_url", DEFAULT_NOTRACK_BASE_URL)
         or DEFAULT_NOTRACK_BASE_URL,
         notrack_model=pick("NOTRACK_MODEL", "notrack_model", DEFAULT_NOTRACK_MODEL) or DEFAULT_NOTRACK_MODEL,
-        brave_api_key=pick("BRAVE_API_KEY", "brave_api_key"),
+        brave_api_key=_sanitize_key(pick("BRAVE_API_KEY", "brave_api_key")),
+        ndus=_sanitize_key(ndus_value),
         knowledge_dir=pick("KNOWLEDGE_DIR", "knowledge_dir"),
         log_dir=pick("LOG_DIR", "log_dir"),
         sessions_dir=pick("SESSIONS_DIR", "sessions_dir"),
@@ -469,6 +729,8 @@ def load_settings(
         root_dir=base_dir,
         declared_keys=tuple(sorted(dotenv.values)),
         dotenv_status=dotenv.status,
+        personal_file=personal_resolved,
+        personal_status=personal_status,
     )
     return settings.ensure_directories() if ensure_dirs else settings
 
@@ -513,9 +775,13 @@ def save_api_keys(
 def dump_public_config(settings: Settings) -> dict[str, Any]:
     """Configuración serializable sin secretos; apta para logs y `--doctor`."""
     data: dict[str, Any] = asdict(settings)
-    for secret in ("notrack_api_key", "brave_api_key"):
+    for secret in ("notrack_api_key", "brave_api_key", "ndus"):
         data[secret] = "(set)" if str(data.get(secret, "")).strip() else ""
     data["dotenv_status"] = settings.dotenv_status.value
+    data["personal_status"] = settings.personal_status.value if hasattr(settings.personal_status, "value") else str(settings.personal_status)
+    data["personal_file_resolved"] = settings.personal_file
+    data["personal_file_present"] = bool(settings.personal_file and Path(settings.personal_file).is_file())
+    data["has_ndus"] = bool(settings.ndus.strip())
     data["root_dir"] = str(settings.root)
     data["knowledge_dir_resolved"] = str(settings.knowledge_path())
     data["log_dir_resolved"] = str(settings.log_path())

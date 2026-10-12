@@ -37,10 +37,14 @@ MIN_PYTHON: tuple[int, int] = (3, 10)
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "autonoma-agent"
 ENV_TEMPLATE = PACKAGE / ".env.example"
+PERSONAL_TEMPLATE = ROOT / "credenciales.txt.example"
+PACKAGE_PERSONAL_TEMPLATE = PACKAGE / "credenciales.txt.example"
 DATA_ENV = PACKAGE / ".env"
 KEY_NAME = "NOTRACK_API_KEY"
 BRAVE_KEY_NAME = "BRAVE_API_KEY"
-PLACEHOLDERS = frozenset({"", "sk-notrack-pega-aqui-tu-clave", "pega-aqui", "tu-clave"})
+NDUS_KEY_NAME = "NDUS"
+PLACEHOLDERS = frozenset({"", "sk-notrack-pega-aqui-tu-clave", "sk-notrack-pega-aqui-tu-clave-de-notrack", "pega-aqui", "pega-aqui-tu-clave", "pega-aqui-tu-clave-de-notrack", "pega-aqui-tu-ndus", "pega-aqui-tu-cookie-ndus-si-la-usas", "tu-clave", "tu-ndus"})
+PERSONAL_FILENAMES = ("credenciales.txt", "mis_claves.txt", "claves.txt", "personal.txt", "keys.txt", "NDUS.txt")
 PYTHON_DOWNLOAD = "https://www.python.org/downloads/"
 DEV_EXTRAS = ("test", "check")  # `test`/`lint`/`types`/`bench` las necesitan; `run` no
 STAMP_NAME = "autonoma-install.json"
@@ -332,7 +336,137 @@ def parse_env_file(path: Path) -> Mapping[str, str]:
 
 
 def is_real_key(value: str) -> bool:
-    return value.strip() not in PLACEHOLDERS
+    text = (value or "").strip()
+    if not text or text in PLACEHOLDERS:
+        return False
+    if "pega-aqui" in text.lower():
+        return False
+    return True
+
+
+def find_personal_file() -> Path | None:
+    """Busca credenciales.txt / mis_claves.txt en orden de prioridad (ROOT, PACKAGE, cwd)."""
+    # 1) Variable de entorno explícita
+    for var in ("AUTONOMA_CREDENTIALS_FILE", "AUTONOMA_PERSONAL_FILE", "CREDENCIALES_FILE", "PERSONAL_FILE"):
+        raw = (os.environ.get(var) or "").strip()
+        if raw:
+            p = Path(raw).expanduser().resolve()
+            return p
+    # 2) Candidatos en directorios conocidos
+    search_dirs = [PACKAGE, ROOT]
+    try:
+        cwd = Path.cwd().resolve()
+        if cwd not in search_dirs:
+            search_dirs.append(cwd)
+    except OSError:
+        pass
+    for directory in search_dirs:
+        for name in PERSONAL_FILENAMES:
+            cand = directory / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def parse_personal_file(path: Path) -> Mapping[str, str]:
+    """Parser tolerante del txt personal: acepta `CLAVE=valor`, `Cookie: ndus=...` y líneas sueltas."""
+    if not path.is_file():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";") or line.startswith("//"):
+            continue
+        # Detectar ndus= en cualquier formato
+        if "ndus=" in line.lower():
+            m = re.search(r"ndus\s*=\s*([^;,\s\"']+)", line, re.IGNORECASE)
+            if m:
+                out["NDUS"] = m.group(1).strip().strip("\"'")
+                # si la línea era `NDUS=...` o `Cookie: ndus=...`, ya capturado; seguir
+                if "=" in line or ":" in line:
+                    # Si además hay otra clave, también guardarla? Priorizar NDUS
+                    pass
+                continue
+            # si no hubo match, seguirá al parsing normal
+        if "=" in line or ":" in line:
+            sep = "=" if "=" in line else ":"
+            key, _, val = line.partition(sep)
+            clean_key = key.strip().strip("\"'").upper().replace("-", "_").replace(" ", "_")
+            clean_val = val.strip().strip("\"'")
+            if not clean_key:
+                continue
+            # Normalizar alias
+            if clean_key in {"NOTRACK_API_KEY", "NOTRACK_KEY", "API_KEY", "SK_NOTRACK", "NOTRACK", "APIKEY"}:
+                out["NOTRACK_API_KEY"] = clean_val.strip("\"'")
+            elif clean_key in {"BRAVE_API_KEY", "BRAVE_KEY"}:
+                out["BRAVE_API_KEY"] = clean_val.strip("\"'")
+            elif clean_key in {"NOTRACK_BASE_URL", "BASE_URL", "API_URL"}:
+                out["NOTRACK_BASE_URL"] = clean_val.strip("\"'")
+            elif clean_key in {"NOTRACK_MODEL", "MODEL"}:
+                out["NOTRACK_MODEL"] = clean_val.strip("\"'")
+            elif clean_key in {"NDUS", "COOKIE_NDUS", "AMAZON_NDUS", "COOKIE"}:
+                # ya manejado ndus=, pero si no contenía patrón, guardar directo
+                if "NDUS" not in out:
+                    out["NDUS"] = clean_val.strip("\"'")
+            else:
+                out[clean_key] = clean_val.strip("\"'")
+            continue
+        # Línea suelta larga → probable API key
+        if len(line) >= 24 and " " not in line and line.count(";") == 0:
+            if line.startswith("sk-") or line.startswith("nt-") or len(line) >= 30:
+                if "NOTRACK_API_KEY" not in out:
+                    out["NOTRACK_API_KEY"] = line.strip("\"'")
+                    continue
+    return out
+
+
+def personal_state() -> dict[str, object]:
+    """Estado del fichero personal para `status` y diagnóstico."""
+    found = find_personal_file()
+    if found is None:
+        # No hay fichero, pero indicar dónde se espera
+        expected = str(PACKAGE / PERSONAL_FILENAMES[0])
+        return {"path": expected, "exists": False, "has_key": False, "has_ndus": False, "has_brave": False}
+    values = parse_personal_file(found)
+    return {
+        "path": str(found),
+        "exists": True,
+        "has_key": is_real_key(values.get(KEY_NAME, "")),
+        "has_ndus": is_real_key(values.get(NDUS_KEY_NAME, "")),
+        "has_brave": is_real_key(values.get(BRAVE_KEY_NAME, "")),
+    }
+
+
+def ensure_personal_file(*, dry_run: bool) -> None:
+    """Crea credenciales.txt a partir de la plantilla si no existe ninguno."""
+    if find_personal_file() is not None:
+        return
+    template = PERSONAL_TEMPLATE if PERSONAL_TEMPLATE.is_file() else PACKAGE_PERSONAL_TEMPLATE
+    if not template.is_file():
+        return
+    target = PACKAGE / PERSONAL_FILENAMES[0]  # credenciales.txt en autonoma-agent/
+    if dry_run:
+        print(f"    (dry-run) crear {target} desde {template.name}", flush=True)
+        return
+    try:
+        target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        if os.name != "nt":
+            with contextlib.suppress(OSError):
+                os.chmod(target, 0o600)
+        say("personal", f"creado {target.name} — pega ahí tu NOTRACK_API_KEY y NDUS")
+        # También copiar a ROOT si PACKAGE != ROOT y no existe allí
+        root_target = ROOT / PERSONAL_FILENAMES[0]
+        if root_target != target and not root_target.exists():
+            with contextlib.suppress(OSError):
+                root_target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+                if os.name != "nt":
+                    os.chmod(root_target, 0o600)
+    except OSError:
+        pass
 
 
 def tty_available() -> bool:
@@ -359,6 +493,13 @@ def ask_secret(prompt: str) -> str:
 
 def ensure_env_file(*, dry_run: bool, interactive: bool) -> bool:
     """Garantiza un `.env` utilizable. Devuelve `True` si hay clave lista para trabajar."""
+    # Si el txt personal ya trae clave, no pedir nada — es el camino personal rápido
+    personal = find_personal_file()
+    if personal is not None:
+        vals = parse_personal_file(personal)
+        if is_real_key(vals.get(KEY_NAME, "")):
+            say("ok", f"clave detectada en {personal.name} — lista para trabajar")
+            return True
     if not DATA_ENV.is_file():
         if dry_run:
             print(f"    (dry-run) crear {DATA_ENV} desde {ENV_TEMPLATE.name}", flush=True)
@@ -370,13 +511,21 @@ def ensure_env_file(*, dry_run: bool, interactive: bool) -> bool:
             DATA_ENV.write_text(f"{KEY_NAME}=\n", encoding="utf-8")
     if is_real_key(parse_env_file(DATA_ENV).get(KEY_NAME, "")):
         return True
+    # Re-comprobar personal por si se creó durante setup
+    personal = find_personal_file()
+    if personal is not None and is_real_key(parse_personal_file(personal).get(KEY_NAME, "")):
+        return True
     if not interactive:
         say("aviso", "sin NOTRACK_API_KEY: necesitas una clave para hablar con el modelo.")
-        say("aviso", f"ponla en {DATA_ENV} o ejecuta: python scripts/bootstrap.py key")
+        say("aviso", f"ponla en {DATA_ENV} o en {PACKAGE / PERSONAL_FILENAMES[0]} (credenciales.txt)")
+        say("aviso", f"o ejecuta: python scripts/bootstrap.py key  |  npm run key")
+        # Si hay txt personal vacío, guiar
+        if personal is None:
+            say("tip", f"edita {PACKAGE / PERSONAL_FILENAMES[0]} — plantilla ya creada — y pega tu clave")
         return False
     print(
         "Necesito tu clave de NoTrack (https://notrack.ai/api-keys). Se guarda sólo en este equipo,\n"
-        f"en {DATA_ENV}. Vacío = la pides más tarde."
+        f"en {DATA_ENV} o en {PACKAGE / PERSONAL_FILENAMES[0]}. Vacío = la pides más tarde."
     )
     value = ask_secret("NOTRACK_API_KEY: ")
     if not value:
@@ -442,6 +591,7 @@ def print_status(venv: Path) -> int:
         "version": version,
         "package": str(PACKAGE),
         "env": env_state(),
+        "personal": personal_state(),
         "portable": sorted(p.name for p in (PACKAGE / "dist").glob("Autonoma*")) if (PACKAGE / "dist").is_dir() else [],
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -466,6 +616,8 @@ def setup(venv: Path, *, dry_run: bool, interactive: bool, ensure_env: bool = Tr
             write_stamp(venv, fingerprint=contract_fingerprint(), python=version)
     else:
         say("2/2", "entorno y paquete ya instalados")
+    # Siempre asegurar plantilla personal (no molesta y evita “¿dónde pongo la clave?”)
+    ensure_personal_file(dry_run=dry_run)
     if ensure_env:
         ensure_env_file(dry_run=dry_run, interactive=interactive)
 
