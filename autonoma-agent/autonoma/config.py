@@ -406,7 +406,7 @@ def read_personal_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith(";") or line.startswith("//"):
+        if not line or line.startswith(("#", ";", "//")):
             continue
         # Extracción prioritaria de NDUS si la línea es tipo Cookie: ndus=...  o NDUS=...
         # Esto evita que `Cookie: ndus=ABC` se parta por `=` en `COOKIE:_NDUS`
@@ -417,7 +417,7 @@ def read_personal_file(path: Path) -> dict[str, str]:
                 values["NDUS"] = extracted
                 low = line.lower().strip()
                 # Si la línea es principalmente una cookie/ndus, ya está procesada
-                if low.startswith("cookie") or low.startswith("ndus") or low.startswith("ndus_cookie") or "cookie:" in low:
+                if low.startswith(("cookie", "ndus", "ndus_cookie")) or "cookie:" in low:
                     continue
                 # Si la línea parece ser `NDUS=valor` pura (clave simple), también continuar
                 # para no reprocesarla como genérica
@@ -465,15 +465,13 @@ def read_personal_file(path: Path) -> dict[str, str]:
             if ndus:
                 values["NDUS"] = ndus
                 continue
-        if len(line) >= 24 and " " not in line and "\t" not in line:
-            if ";" not in line and "," not in line:
-                if "NOTRACK_API_KEY" not in values:
-                    if line.startswith("sk-") or line.startswith("nt-") or len(line) >= 30:
-                        values["NOTRACK_API_KEY"] = line.strip("\"'")
-                        continue
-                if "NDUS" not in values and len(line) >= 40:
-                    values["NDUS"] = line.strip("\"'")
-                    continue
+        if len(line) >= 24 and " " not in line and "\t" not in line and ";" not in line and "," not in line:
+            if "NOTRACK_API_KEY" not in values and (line.startswith(("sk-", "nt-")) or len(line) >= 30):
+                values["NOTRACK_API_KEY"] = line.strip("\"'")
+                continue
+            if "NDUS" not in values and len(line) >= 40:
+                values["NDUS"] = line.strip("\"'")
+                continue
     return values
 
 
@@ -484,11 +482,7 @@ def find_personal_file(base_dir: Path, env: Mapping[str, str] | None = None) -> 
         raw = (source.get(var) or "").strip()
         if raw:
             candidate = Path(raw).expanduser()
-            if not candidate.is_absolute():
-                candidate = (base_dir / candidate).resolve()
-            else:
-                candidate = candidate.resolve()
-            return candidate
+            return ((base_dir / candidate) if not candidate.is_absolute() else candidate).resolve()
     search_dirs: list[Path] = []
     try:
         resolved_base = base_dir.resolve()
@@ -521,9 +515,7 @@ def find_personal_file(base_dir: Path, env: Mapping[str, str] | None = None) -> 
     return None
 
 
-def personal_file_payload(
-    path: Path | None, *, env: Mapping[str, str] | None = None
-) -> tuple[dict[str, str], DotEnvStatus, str]:
+def personal_file_payload(path: Path | None) -> tuple[dict[str, str], DotEnvStatus, str]:
     """Lee el personal si existe; devuelve (valores, estado, ruta_str)."""
     if path is None:
         return {}, DotEnvStatus.MISSING, ""
@@ -551,9 +543,7 @@ def _is_real_key(value: str) -> bool:
     text = (value or "").strip()
     if not text or text in _PLACEHOLDERS:
         return False
-    if "pega-aqui" in text.lower():
-        return False
-    return True
+    return "pega-aqui" not in text.lower()
 
 
 def _unquote(value: str) -> str:
@@ -703,7 +693,7 @@ def load_settings(
         process_env.get("NDUS")
         or dotenv.values.get("NDUS")
         or personal_values.get("NDUS")
-        or _normalize_json_value(json_values.get("ndus", ""))  # type: ignore[arg-type]
+        or _normalize_json_value(json_values.get("ndus", ""))
         or ""
     )
     def _sanitize_key(value: str) -> str:
