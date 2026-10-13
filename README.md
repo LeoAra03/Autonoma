@@ -77,3 +77,12 @@ escribes tú y un presupuesto que corta el exceso. Los límites son configurable
 aprobación (`SI` propio o política delegada) sigue siendo obligatoria para cualquier escritura o comando, y no hay
 sandbox simulado. Detalle en [`autonoma-agent/README.md`](autonoma-agent/README.md) y en
 [INSTALAR § modo desatendido](INSTALL.md#5-dejarlo-correr-solo-modo-desatendido).
+
+## Asistente web para arena.ai (en construcción)
+
+`arena-web/` usa **tu propio Brave** por CDP, con tu sesión ya iniciada, para que el lazo trabaje en
+arena.ai mientras tú haces otra cosa: sin tocar tu ratón, una sola pestaña y con ritmo humano.
+Se construye por etapas y cada una corre sola; la **1** ya está: `cd arena-web && ./execute --probe`
+se conecta, recorre el DOM y te dice qué selector funciona y cuál no, para corregirlo en
+`selectors.toml`. **No envía ningún prompt.** Detalle y nota legal en
+[`arena-web/README.md`](arena-web/README.md).

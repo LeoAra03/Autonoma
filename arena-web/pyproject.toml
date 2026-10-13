@@ -1,0 +1,23 @@
+# Sólo para herramientas: aquí no hay paquete que instalar, son scripts.
+[tool.ruff]
+# Las mismas reglas que el agente (viven en autonoma-agent/pyproject.toml). Se
+# extienden en vez de copiarse para que un directorio nuevo no invente su estilo.
+extend = "../autonoma-agent/pyproject.toml"
+
+[tool.ruff.lint.per-file-ignores]
+# Las pruebas usan `assert` a propósito y no documentan cada fixture: las mismas
+# licencias que `tests/` del agente.
+"tests/*" = ["ANN", "ARG", "B011", "FBT001", "FBT002", "INP001", "PLR2004", "S101", "SLF001", "T201"]
+# El sondeo ES una herramienta de consola: imprimir la tabla es su trabajo.
+"probe.py" = ["T201"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+files = ["probe.py", "probing.py", "cdp.py", "registro.py"]
+
+[[tool.mypy.overrides]]
+# Igual que en el agente: dependencias opcionales sin stubs.
+module = ["playwright.*", "tomli", "tomllib"]
+ignore_missing_imports = true

@@ -1,0 +1,82 @@
+# Selectores de la interfaz de arena.ai  ·  DATOS, no código
+#
+# Cada grupo es una lista de estrategias en orden de preferencia. El probe prueba
+# TODAS y te imprime cuál resolvió. Si ninguna resuelve, te imprime además los
+# candidatos que sí hay en la página: corriges aquí y no tocas Python.
+#
+# Reglas:
+#   - Primero por accesibilidad (role + nombre, aria-label, placeholder, texto).
+#   - El CSS estructural es el último recurso; nunca clases hasheadas.
+#   - `exact = false` por defecto: el texto de la interfaz cambia de mayúsculas.
+
+[chat_nuevo]
+descripcion = "Abrir un chat nuevo"
+estrategias = [
+  { kind = "role", role = "button", name = "New chat" },
+  { kind = "role", role = "link", name = "New chat" },
+  { kind = "aria", label = "New chat" },
+  { kind = "text", text = "New chat" },
+  { kind = "css", selector = "a[href='/']" },
+]
+
+[modo_agente]
+descripcion = "Activar Agent Mode (el interruptor)"
+estrategias = [
+  { kind = "role", role = "switch", name = "Agent" },
+  { kind = "role", role = "button", name = "Agent Mode" },
+  { kind = "aria", label = "Agent Mode" },
+  { kind = "text", text = "Agent Mode" },
+]
+
+[conexion_github]
+descripcion = "Estado de la conexión con GitHub (para comprobar si está activa)"
+estrategias = [
+  { kind = "role", role = "button", name = "GitHub" },
+  { kind = "aria", label = "GitHub" },
+  { kind = "text", text = "GitHub" },
+]
+
+[repositorio]
+descripcion = "Selector del repositorio donde trabaja el agente"
+estrategias = [
+  { kind = "role", role = "combobox", name = "repository" },
+  { kind = "role", role = "button", name = "repository" },
+  { kind = "aria", label = "Select a repository" },
+  { kind = "text", text = "Select a repository" },
+]
+
+[caja_prompt]
+descripcion = "Caja donde se escribe el prompt"
+estrategias = [
+  { kind = "role", role = "textbox", name = "Ask" },
+  { kind = "placeholder", placeholder = "Ask" },
+  { kind = "aria", label = "Ask anything" },
+  { kind = "css", selector = "textarea" },
+  { kind = "css", selector = "[contenteditable='true']" },
+]
+
+[boton_enviar]
+descripcion = "Enviar el prompt (un solo turno, jamás en bucle)"
+estrategias = [
+  { kind = "role", role = "button", name = "Send" },
+  { kind = "aria", label = "Send message" },
+  { kind = "aria", label = "Send" },
+  { kind = "testid", id = "send-button" },
+]
+
+[boton_detener]
+descripcion = "Botón Stop: aparece mientras el modelo responde"
+estrategias = [
+  { kind = "role", role = "button", name = "Stop" },
+  { kind = "aria", label = "Stop" },
+  { kind = "text", text = "Stop" },
+]
+
+[respuesta_asistente]
+descripcion = "Última respuesta del asistente (de donde se extrae el texto)"
+estrategias = [
+  { kind = "role", role = "article" },
+  { kind = "testid", id = "conversation-turn" },
+  { kind = "css", selector = "main [data-turn='assistant']" },
+  { kind = "css", selector = "main" },
+]
