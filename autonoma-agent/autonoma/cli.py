@@ -28,10 +28,11 @@ from typing import Any, Final
 from autonoma import __app_name__, __version__
 from autonoma.agent import Agent, build_agent, build_approval_policy
 from autonoma.approval import ApprovalPolicy, load_approval_policy, write_policy_template
-from autonoma.config import Settings, load_settings, save_api_keys
+from autonoma.config import Settings, clear_ndus, load_settings, save_api_keys, save_ndus
 from autonoma.diagnostics import run_diagnostics, run_selftest
 from autonoma.errors import AutonomaError, CancelledByUserError, ExitCode
 from autonoma.key_handler import KeyHandler, ListenerStatus, PanicController, PanicError
+from autonoma.ndus import COPY_HINTS, import_ndus, mask, probe_sources
 from autonoma.observability import MetricsRegistry, configure_logging, current_trace_id, log_event
 from autonoma.ports import ConsolePort, EventKind
 from autonoma.presentation import approval_heading, operation_preview, safe_text
@@ -78,6 +79,10 @@ Comandos
   /quit  /exit       salir
   /key               pegar NOTRACK_API_KEY (no se muestra)
   /brave             pegar BRAVE_API_KEY (opcional)
+  /ndus [valor]      importar la cookie NDUS: valor suelto, `ndus=...` o cabecera Cookie
+  /ndus auto         buscarla en los navegadores de esta máquina y guardarla
+  /ndus archivo RUTA leerla de un cookies.txt exportado (o de la cabecera pegada)
+  /ndus ver          ver el valor enmascarado   ·   /ndus borrar  quitarla del txt personal
   /status            claves, knowledge_base, pánico y métricas
   /kb                listar notas de knowledge_base
   /clear             borrar historial de conversación
@@ -504,7 +509,7 @@ class Session:
     # ------------------------------------------------------------------ estado
     def status(self) -> None:
         personal = self.settings.personal_file or "credenciales.txt (no encontrado)"
-        ndus_line = "sí" if self.settings.has_ndus else "no (opcional)"
+        ndus_line = mask(self.settings.ndus) if self.settings.has_ndus else "no (opcional)"
         # Indicar de dónde vino la clave
         if self.settings.has_notrack_key:
             if self.settings.personal_status.value == "ok" and self.settings.personal_file:
@@ -833,6 +838,101 @@ class Session:
         self.console.print("BRAVE_API_KEY actualizada.", style="ok")
         return True
 
+    # ------------------------------------------------------------------- NDUS
+    def _cmd_ndus(self, rest: str = "") -> bool:
+        """`/ndus`: pegar, autodetectar, importar de archivo, ver o borrar la cookie."""
+        raw = (rest or "").strip()
+        if not raw:
+            return self._ndus_interactive()
+        first, _, tail = raw.partition(" ")
+        subcommand = first.lower()
+        if subcommand == "auto":
+            return self._ndus_apply(import_ndus(auto=True), "navegadores de esta máquina")
+        if subcommand in {"archivo", "file"}:
+            path = Path(tail.strip()).expanduser()
+            if not tail.strip():
+                self.console.print("falta la ruta: /ndus archivo cookies.txt", style="err")
+                return True
+            if not path.is_file():
+                self.console.print(f"no existe el archivo: {path}", style="err")
+                return True
+            return self._ndus_apply(import_ndus(file=path), f"archivo {path.name}")
+        if subcommand in {"ver", "show"}:
+            self._ndus_show()
+            return True
+        if subcommand in {"borrar", "clear"}:
+            return self._ndus_clear()
+        return self._ndus_apply(import_ndus(text=raw), "texto pegado")
+
+    def _ndus_interactive(self) -> bool:
+        """Sin argumentos: muestra el estado y, si hay TTY, deja pegar sin eco."""
+        self._ndus_show()
+        self.console.print(COPY_HINTS)
+        if not sys.stdin.isatty():
+            self.console.print(
+                "Aquí no hay terminal interactiva: pásala como argumento (/ndus <valor>) "
+                "o con la variable NDUS=valor.",
+                style="muted",
+            )
+            return True
+        value = _read_secret("NDUS (no se muestra): ")
+        if not value:
+            self.console.print("NDUS sin cambios.", style="muted")
+            return True
+        return self._ndus_apply(import_ndus(text=value), "texto pegado")
+
+    def _ndus_show(self) -> None:
+        """Estado de la cookie sin revelarla: enmascarada y con su origen."""
+        if self.settings.has_ndus:
+            self.console.print(f"NDUS: {mask(self.settings.ndus)}", style="ok")
+            return
+        self.console.print("NDUS: no configurada (opcional)", style="muted")
+
+    def _ndus_apply(self, result: Any, origin: str) -> bool:
+        """Guarda lo importado y lo deja vigente en la sesión sin recargar de disco."""
+        if not result.ok:
+            self.console.print(f"No se encontró NDUS en {origin}: {result.detail}", style="warn")
+            self.console.print(COPY_HINTS)
+            for probe in probe_sources()[:6]:
+                self.console.print(probe.describe())
+            return True
+        try:
+            path = save_ndus(result.value, personal_path=self._personal_path_or_none(), root=self.context.root)
+        except (AutonomaError, OSError) as exc:
+            detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+            self.console.print(f"No se pudo guardar la NDUS: {safe_text(detail)}", style="err")
+            return True
+        self._overrides["NDUS"] = result.value
+        self.settings = self.settings.with_ndus(result.value)
+        self.console.print(
+            f"NDUS guardada en {path.name} · {mask(result.value)} · origen: {result.origin}",
+            style="ok",
+        )
+        return True
+
+    def _ndus_clear(self) -> bool:
+        """Borra la cookie del txt personal y avisa si además vive en `.env` (prioridad)."""
+        try:
+            path = clear_ndus(personal_path=self._personal_path_or_none(), root=self.context.root)
+        except (AutonomaError, OSError) as exc:
+            detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+            self.console.print(f"No se pudo borrar la NDUS: {safe_text(detail)}", style="err")
+            return True
+        self._overrides["NDUS"] = ""
+        self.settings = self.settings.with_ndus("")
+        self.console.print(f"NDUS eliminada de {path.name}.", style="ok")
+        if "NDUS" in self.settings.declared_keys:
+            self.console.print(
+                "Aviso: `.env` también define NDUS y tiene prioridad; bórrala allí para que surta efecto.",
+                style="warn",
+            )
+        return True
+
+    def _personal_path_or_none(self) -> Path | None:
+        """El txt personal detectado, o `None` para que `save_ndus` elija dónde crearlo."""
+        raw = (self.settings.personal_file or "").strip()
+        return Path(raw) if raw else None
+
     # -------------------------------------------------------------- ciclo final
     def close(self) -> None:
         """Cierra listener, recursos del agente y handlers de log, en ese orden."""
@@ -863,6 +963,7 @@ _COMMAND_TABLE: Final[Mapping[str, CommandHandler]] = {
     "/kb": Session._cmd_kb,
     "/key": Session._cmd_key,
     "/brave": Session._cmd_brave,
+    "/ndus": Session._cmd_ndus,
 }
 
 
@@ -1023,6 +1124,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-persist", action="store_true", help="no escribir sesiones en disco en esta corrida")
     parser.add_argument(
+        "--ndus",
+        metavar="TEXTO",
+        help="importar la cookie NDUS: el valor suelto, `ndus=valor` o la cabecera Cookie completa",
+    )
+    parser.add_argument(
+        "--ndus-file",
+        metavar="RUTA",
+        help="leer la cookie NDUS de un archivo: `cookies.txt` exportado, cabecera Cookie o valor suelto",
+    )
+    parser.add_argument(
+        "--ndus-auto",
+        action="store_true",
+        help="buscar la cookie NDUS en los navegadores de esta máquina y guardarla si aparece",
+    )
+    parser.add_argument(
         "--max-steps", type=int, default=None, metavar="N", help="tope de iteraciones herramienta-modelo (1-200)"
     )
     parser.add_argument("prompt", nargs="*", help="instrucción única (sin REPL)")
@@ -1054,6 +1170,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"{' y '.join(extra)} requiere --supervise")
     if args.force and args.init_policy is None:
         parser.error("--force sólo acompaña a --init-policy")
+    ndus_flags = [
+        flag
+        for flag, value in (("--ndus", args.ndus), ("--ndus-file", args.ndus_file), ("--ndus-auto", args.ndus_auto))
+        if value
+    ]
+    if ndus_flags and (args.doctor or args.selftest or args.init_policy is not None):
+        parser.error(f"{' y '.join(ndus_flags)} no se mezcla con --doctor, --selftest ni --init-policy")
     if args.init_policy is not None and (args.doctor or args.selftest or args.supervise or args.prompt):
         parser.error("--init-policy no se mezcla con prompts, --doctor, --selftest ni --supervise")
     if args.supervise and not (" ".join(args.prompt).strip() or (args.goal_file or "").strip()):
@@ -1133,6 +1256,37 @@ def _emit_policy_template(args: argparse.Namespace, context: RuntimeContext) -> 
     raise SystemExit(int(ExitCode.SUCCESS))
 
 
+def _import_ndus_from_args(args: argparse.Namespace, context: RuntimeContext) -> bool:
+    """Importa la cookie NDUS desde los flags; `False` si no se pudo (es opcional).
+
+    El valor nunca se imprime: sólo su máscara. Tras guardarla, la sesión en curso
+    la recibe como override para no tener que releer el disco.
+    """
+    try:
+        result = import_ndus(
+            text=args.ndus or None,
+            file=Path(args.ndus_file).expanduser() if args.ndus_file else None,
+            auto=bool(args.ndus_auto),
+        )
+    except OSError as exc:
+        print(f"No se pudo leer la cookie NDUS: {safe_text(str(exc))}", file=sys.stderr)
+        return False
+    if not result.ok:
+        print(f"NDUS no encontrada: {result.detail}", file=sys.stderr)
+        for probe in probe_sources()[:8]:
+            print(probe.describe(), file=sys.stderr)
+        print(COPY_HINTS, file=sys.stderr)
+        return False
+    try:
+        path = save_ndus(result.value, root=context.root)
+    except (AutonomaError, OSError) as exc:
+        detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+        print(f"No se pudo guardar la NDUS: {safe_text(detail)}", file=sys.stderr)
+        return False
+    print(f"NDUS importada desde {result.origin} · {mask(result.value)} → {path}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> None:
     """Punto de entrada del paquete y del ejecutable congelado."""
     args = parse_args(argv)
@@ -1144,6 +1298,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.init_policy is not None:
         return _emit_policy_template(args, context)
     prompt = " ".join(args.prompt).strip() or None
+    if args.ndus or args.ndus_file or args.ndus_auto:
+        imported = _import_ndus_from_args(args, context)
+        # Sin prompt ni terminal interactiva no hay nada más que hacer: se importa y sale.
+        if not prompt and not sys.stdin.isatty():
+            maybe_pause_on_exit(args)
+            raise SystemExit(int(ExitCode.SUCCESS) if imported else int(ExitCode.CONFIGURATION))
     overrides: dict[str, str] = {}
     if args.no_persist:
         overrides["SESSION_PERSIST"] = "false"

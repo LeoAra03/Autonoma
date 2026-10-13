@@ -127,6 +127,49 @@ unset NOTRACK_API_KEY                                   # opcional en loopback
 es la firma de un servidor propio, no un permiso para bajar la guardia. Cualquier otro endpoint sin HTTPS se rechaza,
 igual que antes. El `--doctor` lo distingue: en loopback dice que no hace falta clave en lugar de pedirte una.
 
+### Recuperar la cookie NDUS (opcional)
+
+La cookie NDUS es **opcional**: sin ella Autonoma funciona igual. Si la usas, el problema
+práctico es que vive en tu navegador, y en un entorno sin navegador (un sandbox, una VM, CI)
+no hay de dónde sacarla. Tres caminos, del más rápido al más lento:
+
+```bash
+# 1. Pegarla: valor suelto, `ndus=...` o la cabecera Cookie completa del inspector.
+autonoma --ndus "Cookie: ubid-acb=abc; ndus=TU-VALOR; session-token=xyz"
+autonoma --ndus "TU-VALOR"                       # también vale el valor a secas
+NDUS=TU-VALOR autonoma "tu prompt"               # o como variable de entorno
+
+# 2. Importar un archivo: `cookies.txt` exportado por una extensión, o la cabecera pegada.
+autonoma --ndus-file ~/Downloads/cookies.txt
+
+# 3. Que la busque él: lee los almacenes de cookies de Firefox, Chrome, Edge, Brave…
+autonoma --ndus-auto
+
+# Dentro del REPL, lo mismo sin salir de la conversación:
+/ndus              # estado y pegado oculto
+/ndus auto         # buscar en los navegadores de esta máquina
+/ndus archivo RUTA # importar de un cookies.txt
+/ndus ver          # ver el valor enmascarado      /ndus borrar  quitarlo del txt personal
+```
+
+Se guarda en el txt personal (`credenciales.txt`, `mis_claves.txt`…), creándolo con permisos
+0600 si no existe, y reemplazando sólo la línea de la cookie: el resto de tus claves queda
+intacto. El valor **nunca se imprime**: en pantalla verás `VALO…7890 (23 caracteres)`.
+
+Cómo copiarla del navegador: `F12` → Application (Chrome/Edge) o Storage (Firefox) →
+Cookies → el dominio → valor de `ndus` (o copia la cabecera `Cookie:` completa, también sirve).
+
+Detalles que importan:
+
+- Firefox guarda la cookie **en claro** y se lee sin dependencias. Chromium/Chrome/Edge/Brave
+  la cifran: en Windows se intenta con DPAPI y en macOS/Linux con el llavero del sistema;
+  para el cifrado AES hace falta `pip install cryptography`. Si no se puede abrir, se dice
+  que está cifrada (y cómo pegarla a mano) en lugar de fingir que no existía.
+- Los almacenes del navegador sólo se **leen**, nunca se escriben, y se copian a un temporal
+  antes de consultarlos para no chocar con el navegador abierto.
+- En un entorno sin navegador `--ndus-auto` no falla en silencio: lista lo que miró y recuerda
+  que puedes pegarla con `--ndus` o `NDUS=`.
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

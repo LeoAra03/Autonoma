@@ -138,7 +138,7 @@ files = ["autonoma"]
 
 [[tool.mypy.overrides]]
 # Dependencias opcionales: sin stubs publicados y ausentes en entornos mínimos.
-module = ["pynput.*", "psutil.*", "playwright.*", "PyInstaller.*"]
+module = ["pynput.*", "psutil.*", "playwright.*", "PyInstaller.*", "cryptography.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

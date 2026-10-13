@@ -333,6 +333,74 @@ def test_brave_key_is_persisted_and_the_agent_rebuilt(made_session, monkeypatch:
     assert "actualizada" in console.text
 
 
+@pytest.fixture
+def ndus_aislado(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Aísla el disco: ni el `credenciales.txt` del repo ni el HOME de quien ejecuta."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    return tmp_path
+
+
+_NDUS_VALUE = "abc123XYZ789prueba-ndus-000111222333"
+_NDUS_HEADER = f"Cookie: ubid-acb=abc123; ndus={_NDUS_VALUE}; session-token=zzz"
+
+
+def test_ndus_command_imports_masks_and_persists(made_session, ndus_aislado: Path) -> None:
+    """El atajo: una línea pega la cookie, la deja vigente y no la imprime entera."""
+    session, console, _, _ = made_session()
+    assert session.handle_command(f"/ndus {_NDUS_HEADER}") is True
+    stored = (ndus_aislado / "credenciales.txt").read_text(encoding="utf-8")
+    assert f"NDUS={_NDUS_VALUE}" in stored
+    assert _NDUS_VALUE not in console.text
+    assert "…" in console.text  # sólo la máscara
+    assert session.settings.ndus == _NDUS_VALUE  # vigente sin recargar de disco
+
+
+def test_ndus_command_archivo_imports_and_clear_removes_it(made_session, ndus_aislado: Path) -> None:
+    source = ndus_aislado / "cookies.txt"
+    source.write_text(f".example.com\tTRUE\t/\tFALSE\t1767225600\tndus\t{_NDUS_VALUE}\n", encoding="utf-8")
+    session, _console, _, _ = made_session()
+    assert session.handle_command(f"/ndus archivo {source}") is True
+    assert session.settings.has_ndus
+    assert session.handle_command("/ndus borrar") is True
+    assert not session.settings.has_ndus
+    assert "NDUS" not in (ndus_aislado / "credenciales.txt").read_text(encoding="utf-8")
+
+
+def test_ndus_command_archivo_without_path_explains(made_session) -> None:
+    session, console, _, _ = made_session()
+    assert session.handle_command("/ndus archivo") is True
+    assert "falta la ruta" in console.text
+
+
+def test_ndus_without_tty_teaches_how_to_copy_it(made_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """En un entorno sin navegador ni terminal, lo único útil es decir cómo pegarla."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    session, console, _, _ = made_session()
+    assert session.handle_command("/ndus") is True
+    assert "/ndus <valor>" in console.text
+    assert "NDUS=valor" in console.text
+
+
+def test_ndus_auto_without_browser_warns_and_writes_nothing(
+    made_session, ndus_aislado: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("autonoma.cli.probe_sources", list)
+    session, console, _, _ = made_session()
+    assert session.handle_command("/ndus auto") is True
+    assert not (ndus_aislado / "credenciales.txt").exists()
+    assert "No se encontró NDUS" in console.text
+
+
+def test_ndus_ver_never_prints_the_value(made_session) -> None:
+    session, console, _, _ = made_session()
+    session.settings = session.settings.with_ndus(_NDUS_VALUE)
+    assert session.handle_command("/ndus ver") is True
+    assert _NDUS_VALUE not in console.text
+    assert "…" in console.text
+
+
 def test_kb_command_lists_notes_or_says_it_is_empty(made_session) -> None:
     session, console, _, _ = made_session()
     assert session.handle_command("/kb") is True

@@ -38,6 +38,12 @@ La aplicación necesita una clave propia de NoTrack para conversaciones reales; 
 Si prefieres que nada salga de tu máquina, apunta el agente a un modelo local (`NOTRACK_BASE_URL=http://127.0.0.1:11434/v1`)
 y la clave deja de ser obligatoria.
 
+La cookie NDUS es **opcional**. Si la usas y no la tienes a mano (por ejemplo, trabajando dentro de un
+entorno sin navegador), recupérala sin salir del programa:
+`autonoma --ndus "<valor o cabecera Cookie>"`, `autonoma --ndus-file cookies.txt`, `autonoma --ndus-auto`
+o `/ndus` dentro del REPL. Detalle en
+[Recuperar la cookie NDUS](autonoma-agent/README.md#recuperar-la-cookie-ndus-opcional).
+
 ## Qué puede hacer hoy
 
 Investigar en la web y leer páginas largas por partes, recorrer y **editar** archivos sin reescribirlos enteros,

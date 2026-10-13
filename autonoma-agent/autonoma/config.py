@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from autonoma.errors import ConfigurationError
+from autonoma.ndus import extract_ndus, is_real_ndus
 from autonoma.runtime import DataOrigin, DataRoot, RenderPreferences, RuntimeContext, resolve_data_root
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "NumericBound",
     "PersonalFile",
     "Settings",
+    "clear_ndus",
     "context_for",
     "dump_public_config",
     "find_personal_file",
@@ -39,6 +41,7 @@ __all__ = [
     "read_dotenv_file",
     "read_personal_file",
     "save_api_keys",
+    "save_ndus",
 ]
 
 DEFAULT_NOTRACK_BASE_URL: Final[str] = "https://api.notrack.ai/v1"
@@ -298,6 +301,10 @@ class Settings:
             brave_api_key=self.brave_api_key if brave is None else brave.strip(),
         )
 
+    def with_ndus(self, ndus: str) -> Settings:
+        """Reemplaza la cookie NDUS en memoria; el guardado en disco lo hace `save_ndus`."""
+        return replace(self, ndus=(ndus or "").strip())
+
     def with_allow_commands(self, *, allow: bool) -> Settings:
         return replace(self, allow_commands=bool(allow))
 
@@ -357,13 +364,25 @@ def _normalize_personal_key(raw: str) -> str:
     return raw.strip().upper().replace("-", "_").replace(" ", "_").replace(".", "_")
 
 
-def _extract_ndus(value: str) -> str | None:
-    """Extrae `ndus=...` de una cadena tipo Cookie, o None si no hay patrón."""
-    text = value.strip()
-    match = re.search(r"ndus\s*=\s*([^;,\s\"']+)", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip().strip("\"'")
-    return None
+#: Extracción canónica de la cookie: vive en `autonoma.ndus` junto al resto del
+#: importador (cabeceras, JSON del inspector, `cookies.txt`). Aquí sólo se reexporta
+#: con el nombre histórico para no romper a quien ya lo importara.
+_extract_ndus = extract_ndus
+
+_PERSONAL_HEADER: Final[str] = (
+    "# Autonoma — credenciales personales. No compartir ni subir a git.\n"
+    "# Formato: CLAVE=valor (una por línea). Las líneas con # son comentarios.\n"
+)
+#: Línea del txt personal que guarda la cookie: `NDUS=…`, `COOKIE=…`, `AMAZON_NDUS=…`
+_PERSONAL_NDUS_KEY: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:NDUS|COOKIE_NDUS|AMAZON_NDUS|AMZ_NDUS|NDUS_COOKIE|COOKIE)\s*=",
+    re.IGNORECASE,
+)
+#: `ndus=…` dentro de una línea (p. ej. `Cookie: ubid=x; ndus=…; otros=…`)
+_PERSONAL_NDUS_TOKEN: Final[re.Pattern[str]] = re.compile(
+    r"(?P<prefix>ndus\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^;,)\s\"']+)(?P=quote)",
+    re.IGNORECASE,
+)
 
 
 def read_personal_file(path: Path) -> dict[str, str]:
@@ -770,6 +789,149 @@ def save_api_keys(
         return {}
     _write_dotenv_file(env_path or project_root() / ".env", payload)
     return payload
+
+
+# --------------------------------------------------------------------------- NDUS
+def _validate_ndus(value: str) -> str:
+    """La cookie debe ser un valor plausible: ni plantilla, ni truncado, ni multilínea."""
+    text = (value or "").strip()
+    if not text:
+        raise ConfigurationError(
+            "NDUS vacía: pega el valor de la cookie, `ndus=valor` o la cabecera Cookie completa",
+            context={"setting": "NDUS"},
+        )
+    if any(char in text for char in _DOTENV_FORBIDDEN_VALUE_CHARS):
+        raise ConfigurationError(
+            "La NDUS no puede contener saltos de línea: copia sólo el valor de la cookie",
+            context={"setting": "NDUS"},
+        )
+    if not is_real_ndus(text):
+        raise ConfigurationError(
+            "La NDUS parece una plantilla o está truncada: copia el valor completo de la cookie",
+            context={"setting": "NDUS"},
+        )
+    return text
+
+
+def _personal_target_path(
+    personal_path: Path | None,
+    root: Path | None,
+    env: Mapping[str, str] | None,
+) -> Path:
+    """Dónde escribir: el txt personal ya existente, o `credenciales.txt` en la raíz."""
+    if personal_path is not None:
+        return personal_path.expanduser()
+    base = root if root is not None else project_root()
+    found = find_personal_file(base, env)
+    return found if found is not None else base / _PERSONAL_FILENAMES[0]
+
+
+def _is_ndus_line(line: str) -> bool:
+    """¿Esta línea del txt personal guarda la cookie? (comentarios aparte)."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith(("#", ";", "//")):
+        return False
+    return "ndus=" in stripped.lower() or bool(_PERSONAL_NDUS_KEY.match(stripped))
+
+
+def _replace_ndus_in_line(line: str, value: str) -> str:
+    """Sustituye el valor conservando la forma de la línea (`Cookie: …` o `NDUS=…`)."""
+    if _PERSONAL_NDUS_TOKEN.search(line):
+        return _PERSONAL_NDUS_TOKEN.sub(lambda match: f"{match.group('prefix')}{value}", line, count=1)
+    return f"NDUS={value}"
+
+
+def _rewrite_personal_ndus(existing: str, value: str | None) -> str:
+    """Reescribe el txt personal: `value=None` borra la cookie; si no había línea, la añade."""
+    lines = existing.splitlines()
+    output: list[str] = []
+    replaced = False
+    for line in lines:
+        if not _is_ndus_line(line):
+            output.append(line)
+            continue
+        if value is None:
+            continue
+        if replaced:
+            output.append(f"# {line.strip()}  (NDUS duplicada; se conserva la primera)")
+            continue
+        output.append(_replace_ndus_in_line(line, value))
+        replaced = True
+    if value is not None and not replaced:
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"NDUS={value}")
+    return "\n".join(output).strip("\n")
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    """Escritura atómica con permisos 0600 desde el temporal: el secreto nunca queda suelto."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".personal-", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        if os.name != "nt":
+            os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        raise ConfigurationError(
+            f"No se pudo escribir {path.name}: el sistema de archivos lo impidió",
+            context={"error": type(exc).__name__},
+        ) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            temporary_path.unlink(missing_ok=True)
+
+
+def _persist_personal_ndus(path: Path, value: str | None) -> None:
+    """Aplica el cambio sobre el txt personal preservando el resto de claves."""
+    existing = ""
+    if path.is_file():
+        try:
+            existing = path.read_text(encoding="utf-8", errors="replace")[:_MAX_PERSONAL_CHARS]
+        except OSError as exc:
+            raise ConfigurationError(
+                f"No se pudo leer {path.name}; revisa permisos",
+                context={"error": type(exc).__name__},
+            ) from exc
+    if not existing.strip():
+        existing = _PERSONAL_HEADER
+    body = _rewrite_personal_ndus(existing, value)
+    _write_text_atomic(path, f"{body}\n" if body.strip() else _PERSONAL_HEADER)
+
+
+def save_ndus(
+    ndus: str,
+    *,
+    personal_path: Path | None = None,
+    root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Guarda la cookie NDUS en el txt personal; devuelve la ruta escrita.
+
+    Va al txt personal y no a `.env` porque es el sitio documentado para pegar la
+    cookie a mano, y porque `.env` gana en prioridad: escribir allí dejaría fuera de
+    juego al archivo del usuario. El llamador aplica el valor como override si quiere
+    usarlo en la sesión en curso sin recargar de disco.
+    """
+    value = _validate_ndus(ndus)
+    path = _personal_target_path(personal_path, root, env)
+    _persist_personal_ndus(path, value)
+    return path
+
+
+def clear_ndus(
+    *,
+    personal_path: Path | None = None,
+    root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Borra la cookie del txt personal; el resto de claves queda intacto."""
+    path = _personal_target_path(personal_path, root, env)
+    _persist_personal_ndus(path, None)
+    return path
 
 
 def dump_public_config(settings: Settings) -> dict[str, Any]:
