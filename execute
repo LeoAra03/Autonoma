@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ./execute "enunciado" --hasta-que-pare
+#
+# Lanza el lazo supervisor de Autonoma sobre un objetivo y lo deja trabajando solo:
+# encadena turnos, escribe lo que hace en supervisor/turns.jsonl y se detiene cuando
+# el modelo dice DONE, cuando se le acaba el presupuesto o cuando lo paras.
+#
+#   ./execute "deja la tanda verde"
+#   ./execute "refactoriza el modulo de auth" --hasta-que-pare
+#   ./execute "refactoriza el modulo de auth" --hasta-que-pare --max 15
+#   ./execute "sigue donde ibamos" --hasta-que-pare --continuar
+#
+# Cómo se para (sin romper nada):
+#   Ctrl+C                      termina al acabar el turno en curso
+#   supervisor/STOP             desde otra terminal (o desde el panel del celular)
+#   supervisor/steer.txt        le das otra instrucción sin pararlo
+#
+# Atajos que añade este wrapper (lo demás pasa tal cual a Autonoma):
+#   --max N     = --turns N         tope de iteraciones (con --hasta-que-pare no hace falta)
+#   --sin-panel                     no abrir el panel
+#   -h, --help                      esta ayuda
+#
+# Por defecto abre el panel en este equipo. Para verlo desde el celular:
+#   ./execute "objetivo" --hasta-que-pare --panel 0.0.0.0
+
+set -euo pipefail
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+uso() {
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  uso
+  exit 0
+fi
+if [[ $# -eq 0 ]]; then
+  uso
+  exit 2
+fi
+
+# ¿Hay enunciado? Algo que no empiece por "-" y no sea el valor de una flag.
+enunciado=0
+for arg in "$@"; do
+  [[ "$arg" == -* ]] || enunciado=1
+done
+if [[ $enunciado -eq 0 ]]; then
+  echo "execute: falta el enunciado. Ejemplo: ./execute \"deja la tanda verde\" --hasta-que-pare" >&2
+  exit 2
+fi
+
+args=()
+panel=1
+dado_panel=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sin-panel)
+      panel=0
+      shift
+      ;;
+    --max)
+      shift
+      [[ $# -gt 0 ]] || { echo "execute: --max necesita un número (--max 15)" >&2; exit 2; }
+      args+=("--turns" "$1")
+      shift
+      ;;
+    --max=*)
+      args+=("--turns" "${1#--max=}")
+      shift
+      ;;
+    --panel | --panel-port)
+      dado_panel=1
+      args+=("$1")
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+[[ $dado_panel -eq 0 && $panel -eq 1 ]] && args+=("--panel")
+args=("--supervise" "${args[@]}")
+
+# Entry point: el ejecutable portable si existe; si no, Python + el paquete.
+if [[ -x "$HERE/Autonoma.exe" ]]; then
+  exe=("$HERE/Autonoma.exe")
+elif [[ -x "$HERE/dist/Autonoma" ]]; then
+  exe=("$HERE/dist/Autonoma")
+else
+  py=""
+  for candidato in "${AUTONOMA_PYTHON:-}" python3 python; do
+    [[ -n "$candidato" ]] || continue
+    if command -v "$candidato" >/dev/null 2>&1; then
+      py="$candidato"
+      break
+    fi
+  done
+  if [[ -z "$py" ]]; then
+    echo "execute: necesito Python 3.10+ (https://www.python.org/downloads/) o el ejecutable portable." >&2
+    exit 127
+  fi
+  exe=("$py" "$HERE/scripts/bootstrap.py" run)
+fi
+
+if [[ "${AUTONOMA_ECHO:-0}" == "1" ]]; then  # para probar el wrapper sin lanzar el lazo
+  printf '%q ' "${exe[@]}" "${args[@]}"
+  echo
+  exit 0
+fi
+
+exec "${exe[@]}" "${args[@]}"

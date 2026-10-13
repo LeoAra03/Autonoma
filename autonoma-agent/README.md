@@ -283,6 +283,31 @@ Cómo está cerrado, y por qué:
 Un detalle de Windows: la primera vez que escuche en `0.0.0.0` el firewall preguntará si permitirlo.
 Concédenlo **sólo en redes privadas**, nunca en públicas.
 
+## Un solo comando: `execute`
+
+```bash
+./execute "deja la tanda verde"                      # lazo con el presupuesto por defecto
+./execute "refactoriza el modulo de auth" --hasta-que-pare
+./execute "refactoriza el modulo de auth" --hasta-que-pare --max 15
+./execute "sigue donde ibamos" --hasta-que-pare --continuar
+```
+
+`execute` (y `execute.bat` en Windows) es el atajo del lazo supervisor: le pasas el enunciado entre
+comillas y él hace el resto. Por dentro es `--supervise` más lo que le pidas.
+
+| Flag | Qué hace |
+| --- | --- |
+| `--hasta-que-pare` | sin tope de turnos ni de tiempo: sigue hasta DONE, STOP o Ctrl+C |
+| `--max N` | tope de iteraciones (atajo de `--turns N`) |
+| `--continuar` | retoma la corrida anterior donde se cortó |
+| `--panel 0.0.0.0` | panel para verlo, dirigirlo y pararlo desde el celular |
+| `--sin-panel` | no abrir el panel |
+| `--repo RUTA` | trabajar en ese repositorio sin que pregunte |
+
+**Cómo se para, sin romper nada**: `Ctrl+C` termina al acabar el turno en curso (no a mitad);
+`supervisor/STOP` desde otra terminal hace lo mismo; `supervisor/steer.txt` le da otra instrucción
+**sin pararlo**. En los tres casos el trabajo queda registrado y se retoma con `--continuar`.
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

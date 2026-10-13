@@ -46,6 +46,21 @@ Detalles en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-
 [Arranque](autonoma-agent/README.md#arranque-en-qué-repositorio-y-con-qué-chat) y
 [desde el celular](autonoma-agent/README.md#verlo-dirigirlo-y-pararlo-desde-el-celular).
 
+## Un solo comando
+
+```bash
+./execute "deja la tanda verde" --hasta-que-pare        # Linux/macOS
+execute "deja la tanda verde" --hasta-que-pare          # Windows
+```
+
+`execute` es un atajo del lazo supervisor: recibe el enunciado entre comillas, arranca el lazo y
+se queda trabajando solo. `--hasta-que-pare` le quita el tope de turnos y de tiempo.
+Atajos propios: `--max N` (= `--turns N`), `--sin-panel` y `--help`. Lo demás pasa tal cual.
+
+Se para con `Ctrl+C` (termina al acabar el turno en curso), creando `supervisor/STOP`, o desde el
+panel del celular. Se retoma con `--continuar`. Detalle en
+[`execute`](autonoma-agent/README.md#un-solo-comando-execute).
+
 La cookie NDUS es **opcional**. Si la usas y no la tienes a mano (por ejemplo, trabajando dentro de un
 entorno sin navegador), recupérala sin salir del programa:
 `autonoma --ndus "<valor o cabecera Cookie>"`, `autonoma --ndus-file cookies.txt`, `autonoma --ndus-auto`

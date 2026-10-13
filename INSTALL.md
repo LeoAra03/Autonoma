@@ -101,6 +101,17 @@ autonoma "tu instrucción"
 
 ---
 
+## 4b) El atajo: `execute`
+
+```bash
+./execute "tu objetivo" --hasta-que-pare     # Linux/macOS
+execute "tu objetivo" --hasta-que-pare       # Windows
+```
+
+Es el lazo supervisor con un nombre: el enunciado entre comillas y las flags que quieras
+(`--max N`, `--continuar`, `--panel 0.0.0.0`, `--repo RUTA`). Se para con Ctrl+C o con
+`supervisor/STOP`, y se retoma con `--continuar`.
+
 ## 5) Dejarlo correr solo (modo desatendido)
 
 Pensado para «que se encargue él mientras hago otra cosa». El lazo supervisor encadena turnos sobre
