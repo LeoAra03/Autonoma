@@ -237,12 +237,16 @@ class _Lazo:
     goal: str
     started: float
     turns: list[TurnRecord]
+    #: El mismo reloj que fijó `started`. Sin guardarlo, `elapsed()` medía con el reloj
+    #: del sistema (el uptime) y el reloj inyectado no servía para acotar la ventana:
+    #: en una máquina recién arrancada el lazo seguía en lugar de agotarse.
+    clock: Callable[[], float] = time.monotonic
     repairs: int = 0
     unparsable: int = 0
     last_next: str = ""
 
     def elapsed(self) -> float:
-        return max(0.0, time.monotonic() - self.started)
+        return max(0.0, self.clock() - self.started)
 
     def time_left(self) -> bool:
         return self.budget.max_minutes <= 0 or self.elapsed() < self.budget.max_minutes * 60.0
@@ -313,7 +317,7 @@ def run_supervisor(
             on_event(kind, message)
 
     effective = budget or SupervisorBudget()
-    lazo = _Lazo(budget=effective, goal=goal, started=clock(), turns=[])
+    lazo = _Lazo(budget=effective, goal=goal, started=clock(), turns=[], clock=clock)
     continuation = ""
     reinject = False
     state: Literal["done", "blocked", "exhausted", "cancelled", "failed"] = "exhausted"

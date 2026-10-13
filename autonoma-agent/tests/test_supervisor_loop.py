@@ -18,6 +18,7 @@ from autonoma.supervisor import (
     STOP_FILENAME,
     TURNS_FILENAME,
     SupervisorBudget,
+    _Lazo,
     goal_from_file,
     parse_continuation,
     run_supervisor,
@@ -184,6 +185,19 @@ def test_un_panic_dentro_del_turno_se_traduce_a_cancelado() -> None:
 
     outcome = run_supervisor("objetivo", boom, budget=SupervisorBudget(max_turns=4))
     assert outcome.state == "cancelled"
+
+
+def test_el_lazo_mide_la_ventana_con_el_reloj_inyectado() -> None:
+    """La ventana se mide con el reloj inyectado, no con el del sistema.
+
+    Midiendo con `time.monotonic()` (el uptime de la máquina) el resultado cambiaba
+    según cuánto llevara encendida: en un runner recién creado, con menos de un minuto
+    de uptime, el lazo seguía en vez de agotarse y el test pasaba a `failed`.
+    """
+    clock = FakeClock(step=120.0)
+    lazo = _Lazo(budget=SupervisorBudget(max_minutes=1.0), goal="objetivo", started=clock(), turns=[], clock=clock)
+    assert lazo.elapsed() == 120.0
+    assert not lazo.time_left()
 
 
 def test_la_ventana_de_tiempo_corta_el_lazo() -> None:
