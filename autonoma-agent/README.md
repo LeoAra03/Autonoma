@@ -243,6 +243,46 @@ Y a partir de ahí ya no pregunta más: se queda trabajando (con `--supervise`, 
   Tus claves, sesiones e informes siguen en la raíz de datos (`--data-dir`), nunca dentro del repo:
   trabajar en un proyecto ajeno no debe dejar tu `credenciales.txt` en su carpeta.
 
+## Verlo, dirigirlo y pararlo desde el celular
+
+Sin instalar nada: el propio Autonoma sirve una página para que la abras desde el navegador del
+teléfono. Ves por dónde va el lazo, le escribes una instrucción nueva y lo paras.
+
+```bash
+# sólo en este equipo (abre la URL que te imprime)
+autonoma --supervise --hasta-que-pare --panel "tu objetivo"
+
+# visible en tu wifi: ábrelo desde el celular con la URL que imprime (lleva el token)
+autonoma --supervise --hasta-que-pare --panel 0.0.0.0 "tu objetivo"
+```
+
+Al arrancar imprime algo como `panel: http://192.168.1.5:8787/?token=…`. Esa dirección es la de tu
+PC en tu red; ábrela en el celular estando en el mismo wifi. La página se refresca cada 10 s.
+
+Lo que puedes hacer desde ahí es exactamente lo mismo que harías en el disco:
+
+| En la página | En disco |
+| --- | --- |
+| Ver estado, turno, resumen y último avance | `supervisor/turns.jsonl` y `supervisor/estado.json` |
+| Escribir una instrucción nueva | `supervisor/steer.txt` |
+| Parar el lazo | `supervisor/STOP` |
+
+Cómo está cerrado, y por qué:
+
+- **Sólo local por defecto.** `--panel` a secas escucha en `127.0.0.1`: desde fuera de tu PC nadie
+  ve nada. Para verlo desde el celular hay que escribirlo (`--panel 0.0.0.0`), y entonces se avisa
+  de que eso es visible en la red.
+- **Token nuevo en cada arranque.** Va en la URL y se exige en todas las rutas; sin él, 401.
+- **No se registran las peticiones.** El token viaja en la URL, así que un log con la URL sería un
+  log con la llave.
+- **Nada se ejecuta desde la web.** Lo único que se puede escribir es `steer.txt` y lo único que se
+  puede crear es `STOP`. No hay botón de comandos ni de shell.
+- **Lo que muestra el modelo se escapa y los secretos conocidos se enmascaran**: esa página se mira
+  desde un teléfono.
+
+Un detalle de Windows: la primera vez que escuche en `0.0.0.0` el firewall preguntará si permitirlo.
+Concédenlo **sólo en redes privadas**, nunca en públicas.
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

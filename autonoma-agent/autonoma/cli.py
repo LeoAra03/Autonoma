@@ -34,6 +34,8 @@ from autonoma.errors import AutonomaError, CancelledByUserError, ExitCode
 from autonoma.key_handler import KeyHandler, ListenerStatus, PanicController, PanicError
 from autonoma.ndus import COPY_HINTS, import_ndus, mask, probe_sources
 from autonoma.observability import MetricsRegistry, configure_logging, current_trace_id, log_event
+from autonoma.panel import DEFAULT_PORT, iniciar_panel
+from autonoma.panel import Panel as PanelWeb
 from autonoma.ports import ConsolePort, EventKind
 from autonoma.presentation import approval_heading, operation_preview, safe_text
 from autonoma.runtime import RenderPreferences, RuntimeContext
@@ -1161,6 +1163,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="preguntar repositorio y chat aunque no haya terminal interactiva",
     )
     parser.add_argument(
+        "--panel",
+        nargs="?",
+        const="127.0.0.1",
+        metavar="DIRECCIÓN",
+        help=f"panel para ver, dirigir y parar el lazo desde el navegador ({DEFAULT_PORT}); "
+        "con --panel 0.0.0.0 lo ve el celular en tu wifi",
+    )
+    parser.add_argument(
+        "--panel-port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="N",
+        help=f"puerto del panel (por defecto {DEFAULT_PORT})",
+    )
+    parser.add_argument(
         "--approval-policy",
         metavar="RUTA",
         help="JSON con el alcance que el usuario delega en modo desatendido (allow-list por herramienta)",
@@ -1400,6 +1417,35 @@ def _supervisor_dir(context: RuntimeContext) -> Path:
     return candidate if candidate.is_absolute() else (context.root / candidate).resolve()
 
 
+def _abrir_panel(
+    args: argparse.Namespace,
+    context: RuntimeContext,
+    consola: ConsolePort,
+    *,
+    overrides: Mapping[str, str] | None = None,
+) -> PanelWeb:
+    """Abre el panel y dice por dónde entrar. Si escucha fuera del equipo, lo advierte."""
+    direccion = args.panel or "127.0.0.1"
+    ajustes = load_settings(overrides=overrides, data_root=context.data_root, ensure_dirs=False)
+    panel = iniciar_panel(
+        _supervisor_dir(context),
+        direccion=direccion,
+        puerto=int(args.panel_port),
+        secretos=tuple(ajustes.secret_values),
+    )
+    urls = panel.urls()
+    consola.print(f"panel: {urls[0]}" if urls else "panel: escuchando (sin URL que mostrar)")
+    for url in urls[1:]:
+        consola.print(f"       {url}")
+    if direccion not in {"127.0.0.1", "localhost", "::1"}:
+        consola.print(
+            "escuchando fuera de este equipo: cualquiera en la red puede intentar entrar "
+            "(hace falta el token, y Windows puede pedirte permiso de firewall)",
+            style="warn",
+        )
+    return panel
+
+
 def main(argv: list[str] | None = None) -> None:
     """Punto de entrada del paquete y del ejecutable congelado."""
     args = parse_args(argv)
@@ -1491,6 +1537,9 @@ def main(argv: list[str] | None = None) -> None:
             detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
             print(f"No se pudo leer el objetivo: {safe_text(detail)}", file=sys.stderr)
             raise SystemExit(int(ExitCode.CONFIGURATION)) from exc
+    panel: PanelWeb | None = None
+    if args.panel:
+        panel = _abrir_panel(args, context, consola, overrides=overrides)
     try:
         code = repl(
             once=prompt,
@@ -1506,6 +1555,10 @@ def main(argv: list[str] | None = None) -> None:
         detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
         print(f"No se pudo iniciar Autonoma: {safe_text(detail)}", file=sys.stderr)
         code = int(exc.exit_code) if isinstance(exc, AutonomaError) else int(ExitCode.CONFIGURATION)
+    finally:
+        # El panel vive en su propio hilo: si el lazo termina, nadie debe quedarse escuchando.
+        if panel is not None:
+            panel.stop()
     maybe_pause_on_exit(args)
     raise SystemExit(code)
 

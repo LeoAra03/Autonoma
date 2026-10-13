@@ -138,6 +138,9 @@ Qué significa cada pieza:
 - **Qué repo y qué chat.** Si no pasas `--repo`, el lazo pregunta dónde trabaja (carpeta actual,
   tu `repos.json` o un escaneo de `AUTONOMA_REPOS`) y si abre un chat nuevo o sigue uno existente.
   Detalle en [Arranque](autonoma-agent/README.md#arranque-en-qué-repositorio-y-con-qué-chat).
+- **Desde el celular.** `--panel` abre una página para ver cómo va, escribirle una instrucción o
+  pararlo; con `--panel 0.0.0.0` se ve desde el teléfono en tu wifi (con token, y avisando).
+  Detalle en [desde el celular](autonoma-agent/README.md#verlo-dirigirlo-y-pararlo-desde-el-celular).
 - **Interrumpirlo.** `Ctrl+C`, o `touch autonoma-agent/supervisor/STOP` desde otra terminal: el lazo se
   corta limpio y los trabajos en segundo plano mueren con él. Para corregir el rumbo sin pararlo, escribe
   en `supervisor/steer.txt`; se lee antes del siguiente turno y se borra.
