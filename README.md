@@ -78,6 +78,15 @@ aprobación (`SI` propio o política delegada) sigue siendo obligatoria para cua
 sandbox simulado. Detalle en [`autonoma-agent/README.md`](autonoma-agent/README.md) y en
 [INSTALAR § modo desatendido](INSTALL.md#5-dejarlo-correr-solo-modo-desatendido).
 
+## Consumo
+
+Autonoma no corre modelos en tu equipo: habla con un proveedor por HTTP, así que su gasto
+es el de un script de consola. Arranca en **~0,20 s y 26 MiB** (antes: 0,28 s y 38 MiB) (las dependencias pesadas se
+cargan sólo cuando se usan), no hay bucles de espera que consuman CPU, y cuando lo dejas
+trabajando solo respira: `--supervise --hasta-que-pare` hace una pausa de 2 s entre turnos
+(`--pausa 0` la quita). Al terminar te dice el pico de memoria del proceso. Detalle en
+[Consumo: el proceso es liviano por diseño](autonoma-agent/README.md#consumo-el-proceso-es-liviano-por-diseño).
+
 ## Asistente web para arena.ai (en construcción)
 
 `arena-web/` usa **tu propio Brave** por CDP, con tu sesión ya iniciada, para que el lazo trabaje en

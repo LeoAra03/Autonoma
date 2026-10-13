@@ -9,6 +9,7 @@ portable y auditable con una sola herramienta.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -30,6 +31,8 @@ from typing import Any, Final
 
 from autonoma.errors import AutonomaError, ErrorCode, redact
 
+_ES_MACOS: Final[bool] = sys.platform == "darwin"
+
 __all__ = [
     "DurationSummary",
     "JsonLogFormatter",
@@ -43,6 +46,7 @@ __all__ = [
     "log_event",
     "measure",
     "new_trace_id",
+    "pico_memoria_mib",
     "runtime_metadata",
     "trace_scope",
 ]
@@ -484,3 +488,23 @@ def _app_version() -> str:
     except ImportError:  # pragma: no cover - sólo en import parcial del empaquetado
         return ""
     return str(__version__)
+
+
+def pico_memoria_mib() -> int | None:
+    """Memoria máxima del proceso en MiB, o `None` si este sistema no la expone.
+
+    Se usa sólo para informar: un número decorativo nunca puede tumbar un turno, así
+    que cualquier fallo devuelve `None`. `psutil` es la fuente (dependencia declarada
+    y válida en Windows, macOS y Linux); sin ella se cae a `resource`, que es POSIX.
+    """
+    with contextlib.suppress(Exception):  # informar nunca puede tumbar un turno
+        import psutil
+
+        return int(psutil.Process().memory_info().rss / (1024 * 1024))
+    try:
+        recurso = importlib.import_module("resource")
+        pico = float(recurso.getrusage(recurso.RUSAGE_SELF).ru_maxrss)
+    except Exception:  # noqa: BLE001 - sin `resource` (Windows) no hay dato y ya está
+        return None
+    # Linux lo reporta en KiB; macOS en bytes.
+    return int(pico / (1024 * 1024 if _ES_MACOS else 1024))

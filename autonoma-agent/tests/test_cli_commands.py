@@ -28,6 +28,7 @@ from autonoma.cli import (
     main,
     maybe_pause_on_exit,
     parse_args,
+    pausa_ya_configurada,
     print_banner,
     repl,
     should_pause_on_exit,
@@ -1140,6 +1141,32 @@ def test_los_flags_del_lazo_se_validan() -> None:
     # Y el modo hasta que pare se puede ajustar sin tocar el código.
     args = parse_args(["--supervise", "--hasta-que-pare", "--tope-fallos", "25", "objetivo"])
     assert args.hasta_que_pare and args.tope_fallos == 25
+
+
+def test_la_pausa_del_lazo_se_valida_y_se_apaga() -> None:
+    """`--pausa 0` es una orden, no un valor ausente: apaga el respiro del modo largo."""
+    with pytest.raises(SystemExit):  # sin --supervise no significa nada
+        parse_args(["--pausa", "5", "objetivo"])
+    with pytest.raises(SystemExit):  # fuera de rango
+        parse_args(["--supervise", "--pausa", "99999", "objetivo"])
+    args = parse_args(["--supervise", "--hasta-que-pare", "--pausa", "0", "objetivo"])
+    assert args.pausa == 0.0
+    args = parse_args(["--supervise", "--pausa", "1.5", "objetivo"])
+    assert args.pausa == 1.5
+    # Sin --pausa no se inventa nada: el valor por defecto lo decide `main` mirando la config.
+    assert parse_args(["--supervise", "--hasta-que-pare", "objetivo"]).pausa is None
+
+
+def test_pausa_ya_configurada_respeta_lo_que_escribio_la_persona(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """El respiro por defecto no pisa una pausa que ya estaba configurada."""
+    monkeypatch.delenv("SUPERVISOR_IDLE_SECONDS", raising=False)
+    assert pausa_ya_configurada(tmp_path) is False
+    (tmp_path / ".env").write_text("SUPERVISOR_IDLE_SECONDS=9\n", encoding="utf-8")
+    assert pausa_ya_configurada(tmp_path) is True
+    monkeypatch.setenv("SUPERVISOR_IDLE_SECONDS", "0")
+    assert pausa_ya_configurada(tmp_path) is True
 
 
 def test_main_aplica_el_repo_elegido(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

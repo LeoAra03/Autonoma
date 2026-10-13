@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -10,7 +13,7 @@ import pytest
 
 from autonoma.filesystem import FileSystemManager, ProtectedPolicy, normalize_parts
 from autonoma.key_handler import PanicController
-from autonoma.observability import MetricsRegistry
+from autonoma.observability import MetricsRegistry, pico_memoria_mib
 from autonoma.tool_contracts import TOOL_SPECS, schemas_payload, tool_schemas
 
 
@@ -93,3 +96,30 @@ def test_counters_snapshot_is_a_copy_not_the_internal_state() -> None:
     snapshot = metrics.counters()
     with pytest.raises(TypeError):
         snapshot["y"] = 2  # type: ignore[index]
+
+
+def test_arrancar_no_carga_las_dependencias_pesadas() -> None:
+    """`import autonoma.cli` no arrastra httpx, bs4 ni rich.
+
+    Se comprueba en un intérprete limpio porque en la sesión de pytest cualquier otro
+    módulo ya pudo haberlas importado, y lo que se promete es el coste del arranque:
+    --version, --help, --doctor o el lazo en segundo plano no dibujan ni navegan, así
+    que no pagan esos ~130 ms ni esos ~14 MiB.
+    """
+    codigo = (
+        "import sys; import autonoma.cli; "
+        "cargados = [m for m in ('httpx', 'bs4', 'rich', 'markdown_it', 'lxml') if m in sys.modules]; "
+        "print(','.join(cargados))"
+    )
+    entorno = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    proceso = subprocess.run(
+        [sys.executable, "-c", codigo], capture_output=True, text=True, env=entorno, check=False
+    )
+    assert proceso.returncode == 0, proceso.stderr
+    assert proceso.stdout.strip() == "", f"se cargaron de más: {proceso.stdout.strip()}"
+
+
+def test_pico_memoria_mib_informa_sin_poder_romper_nada() -> None:
+    """El medidor es decorativo: da un número sano o `None`, nunca una excepción."""
+    pico = pico_memoria_mib()
+    assert pico is None or (isinstance(pico, int) and pico > 0)

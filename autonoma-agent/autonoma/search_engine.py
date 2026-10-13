@@ -23,11 +23,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from html import unescape
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 from urllib.parse import quote_plus, urlparse
 
-import httpx
-from bs4 import BeautifulSoup
+# `httpx` (cliente HTTP) y `bs4`/`lxml` (parseo de HTML) se importan dentro de las
+# funciones que los usan: entre los dos suman ~80 ms y ~17 MiB al arrancar, y sólo
+# hacen falta cuando de verdad se investiga en la web.
+if TYPE_CHECKING:  # sólo para el tipado: en runtime se importa dentro de las funciones
+    import httpx
 
 from autonoma.errors import (
     AutonomaError,
@@ -122,6 +125,8 @@ class _BraveCandidate:
 
 def visible_text(html: str, limit: int = _TEXT_LIMIT) -> str:
     """Texto visible sin scripts ni maquetación, colapsado y recortado."""
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(_BLOCKED_TAGS):
         tag.decompose()
@@ -261,6 +266,8 @@ def _hit_from_api(item: Any) -> SearchHit:
 
 def parse_results_html(html: str, count: int) -> tuple[SearchHit, ...]:
     """Extracción tolerante: si Brave cambia el marcado, se degrada a `a[href]`."""
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, "lxml")
     nodes = _result_nodes(soup)
     hits: list[SearchHit] = []
@@ -374,6 +381,8 @@ class SearchEngine:
 
     def _ensure_client(self) -> httpx.Client:
         """Cliente creado una sola vez, bajo lock: es thread-safe compartirlo."""
+        import httpx
+
         client = self._http
         if client is not None and not client.is_closed:
             return client
@@ -388,6 +397,8 @@ class SearchEngine:
 
     def close(self) -> None:
         """Cierra el cliente HTTP (seguro desde el hilo de pánico) y su registro de limpieza."""
+        import httpx
+
         self.panic.unregister_cleanup(self.close)
         client = self._http
         self._http = None
@@ -534,6 +545,8 @@ class SearchEngine:
         return text
 
     def _download_visible_text(self, url: str) -> str:
+        import httpx
+
         client = self._ensure_client()
         try:
             # `follow_redirects=False` también por petición: un cliente compartido mal

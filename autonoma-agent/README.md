@@ -308,6 +308,34 @@ comillas y él hace el resto. Por dentro es `--supervise` más lo que le pidas.
 `supervisor/STOP` desde otra terminal hace lo mismo; `supervisor/steer.txt` le da otra instrucción
 **sin pararlo**. En los tres casos el trabajo queda registrado y se retoma con `--continuar`.
 
+## Consumo: el proceso es liviano por diseño
+
+Autonoma no corre modelos: habla con un proveedor por HTTP. Así que su gasto en tu
+máquina es el de un script de consola, y se mantiene ahí con tres decisiones:
+
+- **Nada pesado se importa al arrancar.** `httpx`, `bs4`/`lxml` y `rich`/`markdown-it`
+  se cargan dentro de la función que los necesita. `import autonoma.cli` pasó de
+  **315 ms y 40 MiB a 188 ms y 26 MiB**, y `autonoma --version` de 0,28 s y 38 MiB a 0,20 s y 26 MiB.
+  Comandos como `--version`, `--help` o `--doctor` no cargan ninguna dependencia
+  externa (hay una prueba que lo verifica en un intérprete limpio).
+- **Nada espera dando vueltas.** No hay *busy-wait*: las esperas son `Event.wait` y
+  `poll()` con intervalo, así que el proceso duerme en vez de consumir CPU.
+- **Nada se paraleliza más que la máquina.** Las herramientas de sólo lectura pueden
+  ir en paralelo, pero el pool se queda en el mínimo entre lo que pidió el modelo, lo
+  que permite `MAX_PARALLEL_TOOL_CALLS` (4) y los núcleos que tengas.
+
+Y una más, para cuando lo dejas solo mucho rato:
+
+| Ajuste | Qué hace |
+|--------|----------|
+| `--pausa SEGUNDOS` | respiro entre turnos del lazo (0-3600). `--pausa 0` lo quita. |
+| `--hasta-que-pare` | sin tope de turnos ni de tiempo; **le aplica una pausa de 2 s por defecto** para no tener el proceso y la red clavados durante horas. |
+| `SUPERVISOR_IDLE_SECONDS` | lo mismo, en el entorno, `.env` o `config.json`. Si ya lo fijaste tú, eso manda y no se te impone ningún valor. |
+
+Al terminar, el lazo dice cuánto pesó: `lazo: detenido por el archivo STOP · 3 turnos ·
+pico 35 MiB`. Es la memoria máxima del proceso, medida con `psutil` (y sin él, con
+`resource`).
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

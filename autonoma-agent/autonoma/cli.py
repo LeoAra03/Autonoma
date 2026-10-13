@@ -9,11 +9,15 @@ Cambios de esta versión:
   eventos), no en clausuras anidadas dentro del turno.
 - Logs JSON estructurados con `trace_id`, métricas en `/status` y `--selftest`
   para validar el ejecutable empaquetado.
+- Arranque liviano: `httpx`, `bs4` y `rich` se cargan dentro de la función que los
+  usa, no al importar el módulo (`--version` y `--help` no pagan esas ~130 ms ni
+  esos ~14 MiB). El lazo respira con `--pausa` y dice su pico de memoria al parar.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -28,12 +32,26 @@ from typing import Any, Final
 from autonoma import __app_name__, __version__
 from autonoma.agent import Agent, build_agent, build_approval_policy
 from autonoma.approval import ApprovalPolicy, load_approval_policy, write_policy_template
-from autonoma.config import Settings, clear_ndus, load_settings, save_api_keys, save_ndus
+from autonoma.config import (
+    Settings,
+    clear_ndus,
+    load_json_config,
+    load_settings,
+    read_dotenv_file,
+    save_api_keys,
+    save_ndus,
+)
 from autonoma.diagnostics import run_diagnostics, run_selftest
 from autonoma.errors import AutonomaError, CancelledByUserError, ExitCode
 from autonoma.key_handler import KeyHandler, ListenerStatus, PanicController, PanicError
 from autonoma.ndus import COPY_HINTS, import_ndus, mask, probe_sources
-from autonoma.observability import MetricsRegistry, configure_logging, current_trace_id, log_event
+from autonoma.observability import (
+    MetricsRegistry,
+    configure_logging,
+    current_trace_id,
+    log_event,
+    pico_memoria_mib,
+)
 from autonoma.panel import DEFAULT_PORT, iniciar_panel
 from autonoma.panel import Panel as PanelWeb
 from autonoma.ports import ConsolePort, EventKind
@@ -64,18 +82,22 @@ from autonoma.supervisor import (
 
 __all__ = ["HELP_TEXT", "Session", "build_console", "main", "parse_args", "repl"]
 
-try:  # la dependencia es opcional por diseño: sin Rich se usa texto plano
-    from rich.console import Console
-    from rich.live import Live
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.text import Text
-    from rich.theme import Theme
 
-    _RICH_IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:  # pragma: no cover - depende del entorno
-    Console = Live = Markdown = Panel = Text = Theme = object  # type: ignore[assignment,misc]
-    _RICH_IMPORT_ERROR = exc
+def _rich_instalado() -> ImportError | None:
+    """`None` si Rich está disponible; el error si no.
+
+    Se pregunta con `find_spec` en vez de importando: cargar Rich (y con él
+    markdown-it-py) cuesta ~50 ms y ~4 MiB, y hay comandos que no dibujan nada
+    (`--version`, `--help`, `--doctor`, el lazo en segundo plano). El import real
+    ocurre sólo donde se va a pintar.
+    """
+    try:
+        return None if importlib.util.find_spec("rich") is not None else ImportError("rich no está instalado")
+    except (ImportError, ValueError):  # pragma: no cover - entornos sin rich instalable
+        return ImportError("rich no está instalado")
+
+
+_RICH_IMPORT_ERROR: ImportError | None = _rich_instalado()
 
 # Sonda de importación: se resuelve una vez al importar el módulo y no vuelve a cambiar.
 RICH_AVAILABLE: Final[bool] = _RICH_IMPORT_ERROR is None
@@ -152,6 +174,9 @@ class RichConsoleFactory:
         self._render = render
 
     def build(self) -> ConsolePort:
+        from rich.console import Console
+        from rich.theme import Theme
+
         theme = Theme({"ok": "green", "warn": "yellow", "err": "bold red", "muted": "dim", "accent": "cyan"})
         return Console(
             theme=theme,
@@ -193,6 +218,8 @@ def banner_body(settings: Settings, status: ListenerStatus) -> str:
 def print_banner(console: ConsolePort, context: RuntimeContext, settings: Settings, status: ListenerStatus) -> None:
     body = banner_body(settings, status)
     if context.use_rich and RICH_AVAILABLE:
+        from rich.panel import Panel
+
         console.print(Panel(body, title=__app_name__, border_style="cyan"))
         return
     console.print("=" * 60)
@@ -228,6 +255,9 @@ class _ProgressReporter:
             thread.join(timeout=1.0)
 
     def _spin(self) -> None:
+        from rich.live import Live
+        from rich.text import Text
+
         index = 0
         try:
             # `Live` exige una `rich.console.Console` real: el spinner sólo corre en modo rich.
@@ -742,13 +772,18 @@ class Session:
         label, style = labels.get(outcome.state, ("el lazo terminó", "warn"))
         if STOP_FILENAME in outcome.report.stopped_by:
             label, style = "detenido por el archivo STOP", "ok"
-        self.console.print(f"\nlazo: {label} · {len(outcome.report.turns)} turnos", style=style)
+        pico = pico_memoria_mib()
+        memoria = f" · pico {pico} MiB" if pico is not None else ""
+        self.console.print(f"\nlazo: {label} · {len(outcome.report.turns)} turnos{memoria}", style=style)
         if outcome.summary:
             self._render_answer(outcome.summary)
 
     def _render_answer(self, answer: str) -> None:
         self.console.print()
         if self.render.use_rich and RICH_AVAILABLE:
+            from rich.markdown import Markdown
+            from rich.panel import Panel
+
             self.console.print(Panel(Markdown(safe_text(answer or "")), title=__app_name__, border_style="green"))
             return
         self.console.print(safe_text(answer))
@@ -1209,6 +1244,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="con --hasta-que-pare, cuántos fallos seguidos se toleran antes de rendirse (1-1000)",
     )
     parser.add_argument(
+        "--pausa",
+        type=float,
+        default=None,
+        metavar="SEGUNDOS",
+        help="respiro entre turnos del lazo (0-3600; --supervise). Con --hasta-que-pare el valor por "
+        f"defecto es {PAUSA_LARGA_POR_DEFECTO:g} s; `--pausa 0` lo quita",
+    )
+    parser.add_argument(
         "--continuar",
         action="store_true",
         help="retomar la corrida anterior del lazo donde se cortó (lee supervisor/estado.json)",
@@ -1275,6 +1318,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             for flag, value in (
                 ("--turns", args.turns),
                 ("--minutes", args.minutes),
+                ("--pausa", args.pausa),
                 ("--goal-file", args.goal_file),
                 ("--keep-going-on-block", args.keep_going_on_block),
             )
@@ -1297,6 +1341,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--hasta-que-pare no se mezcla con --turns ni --minutes: el lazo no tiene tope")
     if args.tope_fallos is not None and not args.hasta_que_pare:
         parser.error("--tope-fallos requiere --hasta-que-pare")
+    if args.pausa is not None and not 0 <= args.pausa <= 3600:
+        parser.error("--pausa debe estar entre 0 y 3600 segundos")
     for flag, value in (("--hasta-que-pare", args.hasta_que_pare), ("--continuar", args.continuar)):
         if value and not args.supervise:
             parser.error(f"{flag} requiere --supervise")
@@ -1320,6 +1366,27 @@ def build_context(args: argparse.Namespace) -> RuntimeContext:
 
 
 NO_PAUSE_ENV = "AUTONOMA_NO_PAUSE"
+
+#: Respiron por defecto del lazo sin tope (`--hasta-que-pare`): entre turnos el proceso
+#: sólo espera al proveedor, así que sin pausa encadena consultas durante horas con la CPU
+#: y la red clavadas. Dos segundos no se notan en una corrida larga y sí en el ventilador.
+#: Se apaga con `--pausa 0`, y cualquier valor propio (entorno, .env, config.json) manda.
+PAUSA_LARGA_POR_DEFECTO: Final[float] = 2.0
+_CLAVE_PAUSA: Final[str] = "SUPERVISOR_IDLE_SECONDS"
+
+
+def pausa_ya_configurada(data_root: Path) -> bool:
+    """¿La persona ya fijó la pausa entre turnos? Entonces no se le impone ninguna."""
+    if os.environ.get(_CLAVE_PAUSA):
+        return True
+    try:
+        if read_dotenv_file(data_root / ".env").values.get(_CLAVE_PAUSA):
+            return True
+        if _CLAVE_PAUSA.lower() in load_json_config(data_root / "config.json"):
+            return True
+    except OSError:  # sin ficheros de configuración no hay valor que respetar
+        return False
+    return False
 
 
 def should_pause_on_exit(
@@ -1484,6 +1551,10 @@ def main(argv: list[str] | None = None) -> None:
         overrides["SUPERVISOR_CONTINUAR"] = "true"
     if args.tope_fallos is not None:
         overrides["SUPERVISOR_TOPE_FALLOS"] = str(args.tope_fallos)
+    if args.pausa is not None:
+        overrides[_CLAVE_PAUSA] = str(args.pausa)
+    elif args.hasta_que_pare and not pausa_ya_configurada(context.data_root.path):
+        overrides[_CLAVE_PAUSA] = str(PAUSA_LARGA_POR_DEFECTO)
     if args.goal_file:
         overrides["SUPERVISOR_GOAL_FILE"] = str(args.goal_file)
 
