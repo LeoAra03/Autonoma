@@ -39,10 +39,13 @@ from autonoma.presentation import approval_heading, operation_preview, safe_text
 from autonoma.runtime import RenderPreferences, RuntimeContext
 from autonoma.sessions import SessionStore
 from autonoma.supervisor import (
+    STEER_FILENAME,
+    STOP_FILENAME,
     TURNS_FILENAME,
     SupervisorBudget,
     SupervisorOutcome,
     SupervisorReport,
+    cargar_estado,
     goal_from_file,
     parse_continuation,
     run_supervisor,
@@ -93,6 +96,12 @@ Comandos
   /next [objetivo]   un turno más del lazo con el paso que quedó pendiente
   /policy [ruta]     ver la política de aprobación delegada, o recargar otra
   /panic             activar cancelación entre tareas
+
+Lazo (--supervise)
+  --hasta-que-pare  sin tope de turnos ni de tiempo: sigue hasta DONE, STOP o Ctrl+C
+  --continuar       retoma la corrida anterior donde se cortó (supervisor/estado.json)
+  Pararlo desde otra terminal: crea el archivo supervisor/STOP
+  Darle una instrucción sin pararlo: escribe supervisor/steer.txt
 
 Pánico
   P global es opcional: inicia con --global-hotkey si lo necesitas.
@@ -602,8 +611,28 @@ class Session:
             max_turns=settings.supervisor_max_turns,
             max_minutes=settings.supervisor_max_minutes,
             idle_seconds=settings.supervisor_idle_seconds,
+            hasta_que_pare=settings.supervisor_hasta_que_pare,
+            max_fallos_seguidos=settings.supervisor_tope_fallos,
         )
         directory = settings.supervisor_path()
+        #: Reanudación: `estado.json` guarda el objetivo, el turno y el paso pendiente.
+        continuation = ""
+        turn_offset = 0
+        if settings.supervisor_continuar:
+            previo = cargar_estado(directory)
+            if previo is None:
+                self.console.print(
+                    "no hay una corrida anterior que continuar: se empieza de cero", style="warn"
+                )
+            else:
+                goal = goal or previo.goal
+                continuation = previo.continuation
+                turn_offset = max(0, previo.turno)
+                self.console.print(
+                    f"continuando la corrida anterior desde el turno {turn_offset + 1}"
+                    + (f" · paso pendiente: {previo.continuation[:120]}" if previo.continuation else ""),
+                    style="muted",
+                )
         self._last_goal = goal
         if not self.agent.notrack.configured:
             # Sin modelo no hay lazo posible: se dice una vez, no se gasta el presupuesto en
@@ -623,11 +652,27 @@ class Session:
             )
             informe.save(directory)
             return SupervisorOutcome(state="blocked", summary=reason, report=informe)
-        self.console.print(
-            f"lazo supervisor: {effective.max_turns} turnos · {effective.max_minutes:g} min · "
-            f"informe en {directory / TURNS_FILENAME}",
-            style="muted",
-        )
+        if effective.hasta_que_pare:
+            self.console.print(
+                "lazo supervisor · MODO HASTA QUE YO PARE: sin tope de turnos ni de tiempo "
+                f"(se rinde tras {effective.max_fallos_seguidos} fallos seguidos)",
+                style="muted",
+            )
+            self.console.print(
+                f"para pararlo: Ctrl+C aquí, o crea el archivo {directory / STOP_FILENAME} desde otra "
+                f"terminal; para darle una orden sin pararlo, escribe {directory / STEER_FILENAME}",
+                style="muted",
+            )
+            self.console.print(
+                f"registro continuo: {directory / TURNS_FILENAME} · reanudable con --continuar",
+                style="muted",
+            )
+        else:
+            self.console.print(
+                f"lazo supervisor: {effective.max_turns} turnos · {effective.max_minutes:g} min · "
+                f"informe en {directory / TURNS_FILENAME}",
+                style="muted",
+            )
         if self.approval_policy is not None and self.approval_policy.enabled:
             self.console.print(
                 f"política delegada activa ({len(self.approval_policy.allow)} reglas, "
@@ -664,6 +709,8 @@ class Session:
             on_event=lambda kind, message: self.console.print(f"  [{kind}] {safe_text(message)}", style="muted"),
             is_cancelled=lambda: self.panic.is_set,
             stop_on_block=settings.supervisor_stop_on_block,
+            continuation=continuation,
+            turn_offset=turn_offset,
         )
 
     def report_supervised(self, outcome: SupervisorOutcome) -> None:
@@ -676,6 +723,8 @@ class Session:
             "failed": ("el lazo se rindió", "err"),
         }
         label, style = labels.get(outcome.state, ("el lazo terminó", "warn"))
+        if STOP_FILENAME in outcome.report.stopped_by:
+            label, style = "detenido por el archivo STOP", "ok"
         self.console.print(f"\nlazo: {label} · {len(outcome.report.turns)} turnos", style=style)
         if outcome.summary:
             self._render_answer(outcome.summary)
@@ -1100,6 +1149,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="permitir que la política delegue `command` (texto interpretado por el shell), no sólo argv",
     )
     parser.add_argument(
+        "--hasta-que-pare",
+        action="store_true",
+        help="lazo sin tope de turnos ni de tiempo: sigue hasta DONE, `supervisor/STOP`, Ctrl+C o el freno de fallos",
+    )
+    parser.add_argument(
+        "--tope-fallos",
+        type=int,
+        default=None,
+        metavar="N",
+        help="con --hasta-que-pare, cuántos fallos seguidos se toleran antes de rendirse (1-1000)",
+    )
+    parser.add_argument(
+        "--continuar",
+        action="store_true",
+        help="retomar la corrida anterior del lazo donde se cortó (lee supervisor/estado.json)",
+    )
+    parser.add_argument(
         "--keep-going-on-block",
         action="store_true",
         help="un BLOCKED no corta el lazo: se trata como turno sin avance",
@@ -1179,8 +1245,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"{' y '.join(ndus_flags)} no se mezcla con --doctor, --selftest ni --init-policy")
     if args.init_policy is not None and (args.doctor or args.selftest or args.supervise or args.prompt):
         parser.error("--init-policy no se mezcla con prompts, --doctor, --selftest ni --supervise")
-    if args.supervise and not (" ".join(args.prompt).strip() or (args.goal_file or "").strip()):
-        parser.error("--supervise necesita un objetivo: un prompt o --goal-file RUTA")
+    if args.hasta_que_pare and (args.turns is not None or args.minutes is not None):
+        parser.error("--hasta-que-pare no se mezcla con --turns ni --minutes: el lazo no tiene tope")
+    if args.tope_fallos is not None and not args.hasta_que_pare:
+        parser.error("--tope-fallos requiere --hasta-que-pare")
+    for flag, value in (("--hasta-que-pare", args.hasta_que_pare), ("--continuar", args.continuar)):
+        if value and not args.supervise:
+            parser.error(f"{flag} requiere --supervise")
+    if args.supervise and not (
+        " ".join(args.prompt).strip() or (args.goal_file or "").strip() or args.continuar
+    ):
+        parser.error("--supervise necesita un objetivo: un prompt, --goal-file RUTA o --continuar")
     return args
 
 
@@ -1287,6 +1362,13 @@ def _import_ndus_from_args(args: argparse.Namespace, context: RuntimeContext) ->
     return True
 
 
+def _supervisor_dir(context: RuntimeContext) -> Path:
+    """Dónde vive `supervisor/` en esta ejecución (respeta `SUPERVISOR_DIR`)."""
+    raw = os.environ.get("SUPERVISOR_DIR", "").strip()
+    candidate = Path(raw).expanduser() if raw else context.root / "supervisor"
+    return candidate if candidate.is_absolute() else (context.root / candidate).resolve()
+
+
 def main(argv: list[str] | None = None) -> None:
     """Punto de entrada del paquete y del ejecutable congelado."""
     args = parse_args(argv)
@@ -1319,12 +1401,31 @@ def main(argv: list[str] | None = None) -> None:
         overrides["SUPERVISOR_MAX_MINUTES"] = str(args.minutes)
     if args.keep_going_on_block:
         overrides["SUPERVISOR_STOP_ON_BLOCK"] = "false"
+    if args.hasta_que_pare:
+        overrides["SUPERVISOR_HASTA_QUE_PARE"] = "true"
+    if args.continuar:
+        overrides["SUPERVISOR_CONTINUAR"] = "true"
+    if args.tope_fallos is not None:
+        overrides["SUPERVISOR_TOPE_FALLOS"] = str(args.tope_fallos)
     if args.goal_file:
         overrides["SUPERVISOR_GOAL_FILE"] = str(args.goal_file)
     supervise_goal: str | None = None
     if args.supervise:
         try:
-            supervise_goal = prompt or goal_from_file(Path(args.goal_file).expanduser())
+            if prompt or (args.goal_file or "").strip():
+                supervise_goal = prompt or goal_from_file(Path(args.goal_file).expanduser())
+            else:
+                # `--continuar` sin objetivo: el objetivo es el de la corrida anterior.
+                previo = cargar_estado(_supervisor_dir(context))
+                if previo is None:
+                    print(
+                        "No hay una corrida anterior que continuar: falta "
+                        f"{_supervisor_dir(context) / 'estado.json'}. "
+                        "Da un objetivo o usa --goal-file RUTA.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(int(ExitCode.CONFIGURATION))
+                supervise_goal = previo.goal
         except (AutonomaError, OSError, ValueError) as exc:
             detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
             print(f"No se pudo leer el objetivo: {safe_text(detail)}", file=sys.stderr)

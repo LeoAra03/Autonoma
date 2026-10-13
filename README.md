@@ -38,6 +38,10 @@ La aplicación necesita una clave propia de NoTrack para conversaciones reales; 
 Si prefieres que nada salga de tu máquina, apunta el agente a un modelo local (`NOTRACK_BASE_URL=http://127.0.0.1:11434/v1`)
 y la clave deja de ser obligatoria.
 
+Puede trabajar solo: `--supervise` encadena turnos sobre un objetivo, y con `--hasta-que-pare` sigue
+hasta que lo paras (`supervisor/STOP`) o el modelo dice `DONE`, con reanudación mediante
+`--continuar`. Detalle en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-pare).
+
 La cookie NDUS es **opcional**. Si la usas y no la tienes a mano (por ejemplo, trabajando dentro de un
 entorno sin navegador), recupérala sin salir del programa:
 `autonoma --ndus "<valor o cabecera Cookie>"`, `autonoma --ndus-file cookies.txt`, `autonoma --ndus-auto`

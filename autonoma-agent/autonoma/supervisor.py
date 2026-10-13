@@ -23,6 +23,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -30,11 +31,17 @@ from autonoma.errors import AutonomaError, CancelledByUserError
 from autonoma.observability import log_event
 
 __all__ = [
+    "SIN_AVANCE_TOPE",
+    "STATE_FILENAME",
+    "STEER_FILENAME",
+    "STOP_FILENAME",
     "TURNS_FILENAME",
     "Continuation",
     "SupervisorBudget",
     "SupervisorOutcome",
     "SupervisorReport",
+    "SupervisorState",
+    "cargar_estado",
     "parse_continuation",
     "run_supervisor",
     "task_prompt",
@@ -45,6 +52,12 @@ logger = logging.getLogger(__name__)
 TURNS_FILENAME: Final[str] = "turns.jsonl"
 #: Archivo donde el humano puede escribir para meter una instrucción en pleno lazo.
 STEER_FILENAME: Final[str] = "steer.txt"
+#: Dónde va el lazo: permite reanudar una corrida cortada (Ctrl+C, apagón, reinicio).
+STATE_FILENAME: Final[str] = "estado.json"
+#: En modo "hasta que pare", cuántos turnos seguidos sin línea de control se toleran.
+#: Es el freno para que un modelo que no avanza no consuma presupuesto indefinidamente;
+#: se sube con `SUPERVISOR_MAX_UNPARSABLE` si hace falta.
+SIN_AVANCE_TOPE: Final[int] = 25
 #: Archivo que, si aparece, corta el lazo de forma limpia (útil desde otra terminal).
 STOP_FILENAME: Final[str] = "STOP"
 
@@ -136,6 +149,13 @@ class SupervisorBudget:
     max_repairs: int = 2
     #: Cuántos turnos sin línea de control se toleran antes de rendirse.
     max_unparsable: int = 2
+    #: Modo "hasta que yo pare": sin tope de turnos ni ventana de tiempo. Sólo corta
+    #: DONE, el archivo `STOP`, la cancelación humana o el freno de fallos seguidos.
+    hasta_que_pare: bool = False
+    #: Freno del modo "hasta que pare": cuántos turnos seguidos con fallo duro (proveedor
+    #: caído, clave rota, sin red) se toleran antes de rendirse. Sin este freno, una
+    #: avería externa dejaría el lazo girando en vacío de forma indefinida.
+    max_fallos_seguidos: int = 10
 
     def as_payload(self) -> dict[str, float]:
         return {
@@ -144,6 +164,8 @@ class SupervisorBudget:
             "idle_seconds": self.idle_seconds,
             "max_repairs": self.max_repairs,
             "max_unparsable": self.max_unparsable,
+            "hasta_que_pare": self.hasta_que_pare,
+            "max_fallos_seguidos": self.max_fallos_seguidos,
         }
 
 
@@ -207,6 +229,69 @@ class SupervisorReport:
 
 
 @dataclass(frozen=True, slots=True)
+class SupervisorState:
+    """Dónde va el lazo: `goal`, turno y continuación pendiente.
+
+    Se escribe en cada turno para que una corrida cortada (Ctrl+C, cierre de la
+    terminal, reinicio) se pueda retomar con `--continuar` sin volver a empezar.
+    """
+
+    goal: str
+    turno: int
+    continuation: str
+    actualizado: str
+
+    def save(self, directory: Path) -> Path:
+        """Escribe `estado.json`; un disco que no escribe nunca tumba el lazo."""
+        target = directory / STATE_FILENAME
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with target.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(
+                    {
+                        "goal": self.goal,
+                        "turno": self.turno,
+                        "continuation": self.continuation,
+                        "actualizado": self.actualizado,
+                    },
+                    handle,
+                    ensure_ascii=False,
+                )
+                handle.write("\n")
+        except OSError:
+            log_event(logger, logging.WARNING, "supervisor.state_unsaved", {"path": str(target)})
+        return target
+
+    @classmethod
+    def cargar(cls, directory: Path) -> SupervisorState | None:
+        """Lee el estado anterior; `None` si no hay corrida previa o está corrupto."""
+        target = directory / STATE_FILENAME
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        goal = payload.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            return None
+        turno = payload.get("turno", 0)
+        continuation = payload.get("continuation", "")
+        actualizado = payload.get("actualizado", "")
+        return cls(
+            goal=goal,
+            turno=int(turno) if isinstance(turno, (int, float)) else 0,
+            continuation=continuation if isinstance(continuation, str) else "",
+            actualizado=actualizado if isinstance(actualizado, str) else "",
+        )
+
+
+def cargar_estado(directory: Path) -> SupervisorState | None:
+    """Atajo de `SupervisorState.cargar` para la CLI (y para quien quiera inspeccionarla)."""
+    return SupervisorState.cargar(directory)
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorOutcome:
     """Decisión del lazo más su reporte: el CLI sólo tiene que imprimir y elegir código de salida."""
 
@@ -242,6 +327,8 @@ class _Lazo:
     #: en una máquina recién arrancada el lazo seguía en lugar de agotarse.
     clock: Callable[[], float] = time.monotonic
     repairs: int = 0
+    #: Fallos duros consecutivos: se reinicia con cada turno que sale bien.
+    fallos_seguidos: int = 0
     unparsable: int = 0
     last_next: str = ""
 
@@ -305,11 +392,18 @@ def run_supervisor(
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     stop_on_block: bool = True,
+    continuation: str = "",
+    turn_offset: int = 0,
 ) -> SupervisorOutcome:
     """Encadena turnos hasta DONE / BLOCKED / tope. `run_turn(prompt)` devuelve la respuesta.
 
     Ningún fallo de un turno aborta el lazo sin más: se reinyecta el objetivo hasta `max_repairs`
     veces, y si aun así no avanza, se rinde con `state="failed"` y el motivo en el resumen.
+
+    Con `budget.hasta_que_pare` el lazo no tiene tope de turnos ni de tiempo: sólo corta DONE,
+    el archivo `STOP`, la cancelación humana o los dos frenos de seguridad (`max_fallos_seguidos`
+    y los turnos seguidos sin avance). `continuation` y `turn_offset` sirven para reanudar una
+    corrida cortada leyendo `estado.json` (`--continuar`).
     """
 
     def emit(kind: str, message: str) -> None:
@@ -318,15 +412,27 @@ def run_supervisor(
 
     effective = budget or SupervisorBudget()
     lazo = _Lazo(budget=effective, goal=goal, started=clock(), turns=[], clock=clock)
-    continuation = ""
-    reinject = False
+    reinject = False  # `continuation` llega como parámetro: vacío al empezar, o el paso pendiente al reanudar
     state: Literal["done", "blocked", "exhausted", "cancelled", "failed"] = "exhausted"
     summary = ""
     stopped_by = ""
 
-    log_event(logger, logging.INFO, "supervisor.started", {"turns_max": effective.max_turns, "goal_chars": len(goal)})
+    #: Modo "hasta que yo pare": desaparecen el tope de turnos y la ventana de tiempo. Quedan
+    #: dos frenos, ambos para no gastar de más: los fallos duros seguidos del proveedor y los
+    #: turnos seguidos sin avance (ése se puede subir con `SUPERVISOR_MAX_UNPARSABLE`).
+    sin_tope = effective.hasta_que_pare
+    tope_sin_avance = max(effective.max_unparsable, SIN_AVANCE_TOPE) if sin_tope else effective.max_unparsable
+    turnos_tope = None if sin_tope else max(1, effective.max_turns)
+    log_event(
+        logger,
+        logging.INFO,
+        "supervisor.started",
+        {"turns_max": turnos_tope, "hasta_que_pare": sin_tope, "goal_chars": len(goal)},
+    )
 
-    for index in range(1, max(1, effective.max_turns) + 1):
+    index = turn_offset
+    while turnos_tope is None or (index - turn_offset) < turnos_tope:
+        index += 1
         if is_cancelled is not None and is_cancelled():
             state, stopped_by = "cancelled", "cancelación humana"
             summary = summary or "lazo detenido antes del turno"
@@ -342,7 +448,7 @@ def run_supervisor(
             break
 
         prompt = task_prompt(goal, continuation=continuation, reinject=reinject)
-        emit("turn", f"turno {index}/{effective.max_turns}")
+        emit("turn", f"turno {index}" if sin_tope else f"turno {index}/{effective.max_turns}")
         started = clock()
         answer = ""
         status = "ok"
@@ -392,13 +498,24 @@ def run_supervisor(
 
         if status == "error":
             lazo.repairs += 1
-            if lazo.repairs > effective.max_repairs or not lazo.time_left():
-                state, summary = "failed", f"el lazo se rinde: {error}"
-                break
-            emit("retry", f"turno con fallo; reintento {lazo.repairs}/{effective.max_repairs}")
+            lazo.fallos_seguidos += 1
+            if sin_tope:
+                if lazo.fallos_seguidos > effective.max_fallos_seguidos:
+                    state, summary = (
+                        "failed",
+                        f"el lazo se rinde tras {lazo.fallos_seguidos} fallos seguidos: {error}",
+                    )
+                    break
+                emit("retry", f"turno con fallo; reintento {lazo.fallos_seguidos}/{effective.max_fallos_seguidos}")
+            else:
+                if lazo.repairs > effective.max_repairs or not lazo.time_left():
+                    state, summary = "failed", f"el lazo se rinde: {error}"
+                    break
+                emit("retry", f"turno con fallo; reintento {lazo.repairs}/{effective.max_repairs}")
             continuation = ""
             reinject = True
             continue
+        lazo.fallos_seguidos = 0  # un turno bueno reinicia el freno de fallos seguidos
 
         if signal.kind == "done":
             state, summary = "done", signal.instruction or "objetivo terminado"
@@ -412,13 +529,16 @@ def run_supervisor(
             lazo.unparsable += 1
             continuation = ""
             reinject = True
-            if lazo.unparsable > effective.max_unparsable:
-                state, summary = "blocked", f"bloqueado dos veces: {signal.instruction[:180]}"
+            if lazo.unparsable > tope_sin_avance:
+                state, summary = (
+                    "blocked",
+                    f"bloqueado {tope_sin_avance + 1} veces seguidas: {signal.instruction[:180]}",
+                )
                 break
         if signal.kind == "next":
             if _looks_like_no_progress(signal.instruction, lazo.last_next):
                 lazo.unparsable += 1
-                if lazo.unparsable > effective.max_unparsable:
+                if lazo.unparsable > tope_sin_avance:
                     state, summary = "blocked", "el lazo repite el mismo paso: se detiene para no girar en vacío"
                     break
             else:
@@ -430,14 +550,27 @@ def run_supervisor(
             lazo.unparsable += 1
             continuation = ""
             reinject = True
-            if lazo.unparsable > effective.max_unparsable:
-                state, summary = "failed", "el modelo no devolvió línea de control en dos turnos seguidos"
+            if lazo.unparsable > tope_sin_avance:
+                state, summary = (
+                    "failed",
+                    f"el modelo no devolvió línea de control en {tope_sin_avance + 1} turnos seguidos",
+                )
                 break
 
-        if not lazo.time_left():
+        if not sin_tope and not lazo.time_left():
             state, summary = "exhausted", f"ventana de {effective.max_minutes:g} minutos agotada"
             stopped_by = "tiempo"
             break
+
+        # Fin del turno: `estado.json` queda con la continuación del paso siguiente, de modo
+        # que `--continuar` retoma el trabajo sin repetir lo ya hecho.
+        if report_dir is not None:
+            SupervisorState(
+                goal=goal,
+                turno=index,
+                continuation=continuation,
+                actualizado=datetime.now(timezone.utc).isoformat(),
+            ).save(report_dir)
 
         # Cada turno es una consulta larga al proveedor: una pausa corta evita martillar la API
         # cuando el lazo avanza en pasos diminutos.

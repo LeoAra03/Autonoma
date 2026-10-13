@@ -174,6 +174,8 @@ NUMERIC_BOUNDS: Final[tuple[NumericBound, ...]] = (
     NumericBound("supervisor_max_turns", "int", 1, 200, 12),
     NumericBound("supervisor_max_minutes", "float", 1, 1_440, 90.0),
     NumericBound("supervisor_idle_seconds", "float", 0, 3_600, 0.0),
+    # Freno del modo "hasta que pare": fallos duros seguidos tolerados antes de rendirse.
+    NumericBound("supervisor_tope_fallos", "int", 1, 1_000, 10),
     NumericBound("approval_policy_max_bytes", "int", 1_024, 1_048_576, 262_144),
 )
 
@@ -216,6 +218,12 @@ class Settings:
     supervisor_max_minutes: float = 90.0
     supervisor_idle_seconds: float = 0.0
     supervisor_stop_on_block: bool = True
+    #: Lazo sin tope de turnos ni de tiempo: sólo corta DONE, `STOP`, Ctrl+C o el freno.
+    supervisor_hasta_que_pare: bool = False
+    #: Fallos duros seguidos que se toleran en el modo "hasta que pare".
+    supervisor_tope_fallos: int = 10
+    #: Retomar la corrida anterior del lazo donde se cortó (`supervisor/estado.json`).
+    supervisor_continuar: bool = False
     approval_policy_max_bytes: int = 262_144
     root_dir: Path | None = None
     declared_keys: tuple[str, ...] = ()
@@ -728,6 +736,9 @@ def load_settings(
         supervisor_idle_seconds=float(numerics["supervisor_idle_seconds"]),
         approval_policy_max_bytes=int(numerics["approval_policy_max_bytes"]),
         supervisor_stop_on_block=_as_bool(pick("SUPERVISOR_STOP_ON_BLOCK", "supervisor_stop_on_block", "true")),
+        supervisor_hasta_que_pare=_as_bool(pick("SUPERVISOR_HASTA_QUE_PARE", "supervisor_hasta_que_pare", "false")),
+        supervisor_continuar=_as_bool(pick("SUPERVISOR_CONTINUAR", "supervisor_continuar", "false")),
+        supervisor_tope_fallos=int(numerics["supervisor_tope_fallos"]),
         session_persist=_as_bool(pick("SESSION_PERSIST", "session_persist", "true")),
         allow_private_network=_as_bool(pick("ALLOW_PRIVATE_NETWORK", "allow_private_network", "false")),
         allow_shell_commands=_as_bool(pick("ALLOW_SHELL_COMMANDS", "allow_shell_commands", "false")),

@@ -170,6 +170,42 @@ Detalles que importan:
 - En un entorno sin navegador `--ndus-auto` no falla en silencio: lista lo que miró y recuerda
   que puedes pegarla con `--ndus` o `NDUS=`.
 
+## Modo "hasta que yo pare"
+
+`--supervise` acotado está bien para una tanda concreta (12 turnos / 90 min por defecto, hasta 200
+turnos / 24 h). Pero cuando lo que quieres es **dar una instrucción y que siga hasta que lo pares**,
+el presupuesto es un estorbo. Con `--hasta-que-pare` desaparecen el tope de turnos y la ventana de
+tiempo:
+
+```bash
+autonoma --supervise --hasta-que-pare \
+  --allow-commands --approval-policy approval.json "tu objetivo"
+```
+
+El lazo sigue indefinidamente y **sólo se detiene** por una de estas:
+
+| Motivo | Cómo |
+| --- | --- |
+| Trabajo terminado | el modelo responde `DONE:` |
+| Tú lo paras | `Ctrl+C` en su terminal |
+| Tú lo paras desde fuera | crea el archivo `supervisor/STOP` desde otra terminal |
+| Freno: fallos seguidos | N turnos seguidos con el proveedor caído / clave rota / sin red |
+| Freno: sin avance | N turnos seguidos sin línea de control (`NEXT:`/`DONE:`/`BLOCKED:`) |
+
+Los dos frenos existen para que una avería externa no deje el lazo consumiendo sin avanzar: no son
+un presupuesto, son una red. El de fallos se ajusta con `--tope-fallos N` (por defecto 10) y el de
+turnos sin avance con `SUPERVISOR_MAX_UNPARSABLE` (por defecto 25 en este modo).
+
+**Cómo convivir con él mientras corre** (todo en `supervisor/`, junto al informe):
+
+- `turns.jsonl` — registro continuo: se reescribe en cada turno con el historial completo.
+- `estado.json` — objetivo, turno y paso pendiente. Si se corta (Ctrl+C, cierre, reinicio), retómalo
+  con `autonoma --supervise --continuar --hasta-que-pare`: sigue en el turno siguiente y recupera el
+  paso donde iba, sin repetir lo hecho.
+- `steer.txt` — escribe ahí una instrucción nueva y el lazo la consume en el siguiente turno
+  **sin pararse**. Es como decirle «ahora revisa esto otro» en mitad del trabajo.
+- `STOP` — créalo y el lazo termina limpio al empezar el siguiente turno.
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

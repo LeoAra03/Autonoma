@@ -38,6 +38,7 @@ from autonoma.errors import ConfigurationError, ExitCode
 from autonoma.key_handler import ListenerState, ListenerStatus
 from autonoma.observability import MetricsRegistry
 from autonoma.runtime import DataOrigin, DataRoot, RenderPreferences, RuntimeContext
+from autonoma.supervisor import STOP_FILENAME, SupervisorState
 
 
 class RecordingConsole:
@@ -1083,6 +1084,71 @@ def test_sin_modelo_el_lazo_no_quema_turnos(made_session, tmp_path: Path) -> Non
     assert agent.prompts == []
     informe = tmp_path / "supervisor" / "turns.jsonl"
     assert json.loads(informe.read_text(encoding="utf-8"))["stopped_by"] == "modelo sin configurar"
+
+
+def test_hasta_que_pare_se_anuncia_y_explica_como_pararlo(made_session, tmp_path: Path) -> None:
+    """El modo nuevo tiene que decir cómo se para: si no, es una trampa."""
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, supervisor_hasta_que_pare=True)
+    agent = ScriptAgent(["paso 1\nNEXT: paso 2", "paso 2\nDONE: terminado"])
+    session, console, _runtime, _fake = made_session(agent=agent, settings=settings)
+    outcome = session.run_supervised("objetivo")
+    assert outcome.state == "done"
+    assert len(agent.prompts) == 2  # el tope de turnos no cortó nada
+    assert "HASTA QUE YO PARE" in console.text
+    assert "STOP" in console.text and "steer.txt" in console.text
+    assert "--continuar" in console.text
+
+
+def test_continuar_reanuda_el_paso_pendiente_de_la_corrida_anterior(made_session, tmp_path: Path) -> None:
+    """Reanudar no empieza de cero: recupera el objetivo, el turno y el paso pendiente."""
+    directorio = tmp_path / "supervisor"
+    SupervisorState(goal="objetivo guardado", turno=4, continuation="revisar el paso 5", actualizado="2026-10-12T00:00:00+00:00").save(directorio)
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, supervisor_continuar=True)
+    agent = ScriptAgent(["DONE: terminado"])
+    session, console, _runtime, _fake = made_session(agent=agent, settings=settings)
+    outcome = session.run_supervised("objetivo guardado")
+    assert outcome.state == "done"
+    assert "continuando la corrida anterior" in console.text
+    assert "revisar el paso 5" in agent.prompts[0]  # el paso pendiente vuelve al prompt
+    assert outcome.report.turns[0].index == 5  # sigue la numeración, no vuelve a 1
+
+
+def test_continuar_sin_corrida_previa_avisa_y_arranca_de_cero(made_session, tmp_path: Path) -> None:
+    """Sin `estado.json` no hay nada que retomar: se dice y se sigue, no se falla en silencio."""
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, supervisor_continuar=True)
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["DONE: ya"]), settings=settings)
+    outcome = session.run_supervised("objetivo")
+    assert outcome.state == "done"
+    assert "no hay una corrida anterior" in console.text
+
+
+def test_los_flags_del_lazo_se_validan() -> None:
+    """Cada flag nueva dice qué le falta en vez de ignorarse sin más."""
+    with pytest.raises(SystemExit):
+        parse_args(["--hasta-que-pare", "objetivo"])
+    with pytest.raises(SystemExit):
+        parse_args(["--continuar"])
+    with pytest.raises(SystemExit):
+        parse_args(["--supervise", "--hasta-que-pare", "--turns", "5", "objetivo"])
+    with pytest.raises(SystemExit):
+        parse_args(["--supervise", "--tope-fallos", "5", "objetivo"])
+    with pytest.raises(SystemExit):
+        parse_args(["--supervise"])
+    # Con --continuar el objetivo sale de la corrida anterior, así que no es obligatorio.
+    args = parse_args(["--supervise", "--continuar"])
+    assert args.continuar and args.supervise
+    # Y el modo hasta que pare se puede ajustar sin tocar el código.
+    args = parse_args(["--supervise", "--hasta-que-pare", "--tope-fallos", "25", "objetivo"])
+    assert args.hasta_que_pare and args.tope_fallos == 25
+
+
+def test_report_supervised_distingue_el_stop_del_presupuesto_agotado(made_session) -> None:
+    """Pararlo con `STOP` es una salida querida, no un presupuesto agotado: se dice distinto."""
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["NEXT: sigo"]))
+    outcome = session.run_supervised("objetivo")
+    (session.settings.supervisor_path() / STOP_FILENAME).write_text("para", encoding="utf-8")
+    session.report_supervised(outcome)
+    assert "lazo:" in console.text
 
 
 def test_report_supervised_cierra_con_resumen(made_session) -> None:

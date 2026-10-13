@@ -132,6 +132,9 @@ Qué significa cada pieza:
   a un shell o escribir sobre un dispositivo de bloque se niegan siempre, aunque la política los nombre.
 - **Topes y salida legible.** `--turns N` (turnos máximos) y `--minutes N` (ventana). El lazo termina con
   código `0` si hubo `DONE`, y `8` si se quedó en `BLOCKED`, agotó el presupuesto o se rindió.
+- **Modo «hasta que yo pare».** Con `--hasta-que-pare` desaparecen el tope de turnos y la ventana de
+  tiempo: el lazo sigue hasta que el modelo dice `DONE`, hasta que lo paras o hasta que salta uno de
+  los dos frenos. Detalle en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-pare).
 - **Interrumpirlo.** `Ctrl+C`, o `touch autonoma-agent/supervisor/STOP` desde otra terminal: el lazo se
   corta limpio y los trabajos en segundo plano mueren con él. Para corregir el rumbo sin pararlo, escribe
   en `supervisor/steer.txt`; se lee antes del siguiente turno y se borra.
