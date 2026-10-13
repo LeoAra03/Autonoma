@@ -1142,6 +1142,73 @@ def test_los_flags_del_lazo_se_validan() -> None:
     assert args.hasta_que_pare and args.tope_fallos == 25
 
 
+def test_main_aplica_el_repo_elegido(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`--repo`: el proceso se mueve al repo y el ajuste viaja a la sesión."""
+    repo = tmp_path / "alpha"
+    repo.mkdir()
+    monkeypatch.chdir(tmp_path)
+    capturado: dict[str, object] = {}
+    monkeypatch.setattr("autonoma.cli.repl", lambda once=None, **kwargs: capturado.update(kwargs) or 0)
+    monkeypatch.setattr("autonoma.cli.maybe_pause_on_exit", lambda args: None)
+    with pytest.raises(SystemExit) as salida:
+        main(["--repo", str(repo), "--data-dir", str(tmp_path), "hola"])
+    assert salida.value.code == 0
+    assert capturado["overrides"]["WORKSPACE_DIR"] == str(repo.resolve())
+    assert Path.cwd().resolve() == repo.resolve()
+
+
+def test_main_rechaza_un_repo_que_no_existe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("autonoma.cli.maybe_pause_on_exit", lambda args: None)
+    with pytest.raises(SystemExit) as salida:
+        main(["--supervise", "--repo", str(tmp_path / "no-está"), "--data-dir", str(tmp_path), "objetivo"])
+    assert salida.value.code == int(ExitCode.CONFIGURATION)
+
+
+def test_main_pregunta_repo_y_chat_cuando_el_lazo_va_solo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sin `--repo`, el lazo pregunta dónde trabaja y con qué conversación sigue."""
+    madre = tmp_path / "madre"
+    (madre / "alpha" / ".git").mkdir(parents=True)
+    sesiones = tmp_path / "sessions"
+    sesiones.mkdir()
+    (sesiones / "20261012-010101-0001.jsonl").write_text(
+        json.dumps({"role": "user", "content": "clasificar facturas", "at": 1}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTONOMA_REPOS", str(madre))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    class ConsolaGuionada:
+        def __init__(self) -> None:
+            self.lineas: list[str] = []
+
+        def print(self, *objects: object, **kwargs: object) -> None:
+            self.lineas.append(" ".join(str(o) for o in objects))
+
+        def input(self, prompt: str = "") -> str:
+            respuestas = {"Elige": iter(["2", "2"])}
+            for clave, valores in respuestas.items():
+                if prompt.startswith(clave):
+                    return next(valores)
+            return ""
+
+    consola = ConsolaGuionada()
+    monkeypatch.setattr("autonoma.cli.build_console", lambda context: consola)
+    capturado: dict[str, object] = {}
+    monkeypatch.setattr("autonoma.cli.repl", lambda once=None, **kwargs: capturado.update(kwargs) or 0)
+    monkeypatch.setattr("autonoma.cli.maybe_pause_on_exit", lambda args: None)
+
+    with pytest.raises(SystemExit) as salida:
+        main(["--supervise", "--data-dir", str(tmp_path), "organiza el repo"])
+    assert salida.value.code == 0
+    # 2 = alpha (1 era la carpeta actual), 2 = el chat existente
+    assert capturado["resume"] == "20261012-010101-0001"
+    assert capturado["overrides"]["WORKSPACE_DIR"] == str((madre / "alpha").resolve())
+    assert Path.cwd().resolve() == (madre / "alpha").resolve()
+
+
 def test_report_supervised_distingue_el_stop_del_presupuesto_agotado(made_session) -> None:
     """Pararlo con `STOP` es una salida querida, no un presupuesto agotado: se dice distinto."""
     session, console, _runtime, _agent = made_session(agent=ScriptAgent(["NEXT: sigo"]))

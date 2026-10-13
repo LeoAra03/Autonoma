@@ -206,6 +206,43 @@ turnos sin avance con `SUPERVISOR_MAX_UNPARSABLE` (por defecto 25 en este modo).
   **sin pararse**. Es como decirle «ahora revisa esto otro» en mitad del trabajo.
 - `STOP` — créalo y el lazo termina limpio al empezar el siguiente turno.
 
+## Arranque: en qué repositorio y con qué chat
+
+Cuando el lazo va a trabajar solo, arranca preguntando **dónde** y **con qué conversación**:
+
+```
+$ autonoma --supervise --hasta-que-pare "deja la tanda verde"
+
+¿Sobre qué repositorio trabajo?
+  1  autonoma      /home/usuario/Autonoma             (actual)
+  2  mi-web        /home/usuario/proyectos/mi-web     (git)
+  3  api-vieja     /home/usuario/proyectos/api-vieja  (registro)
+  4  otra ruta…
+Elige [1]: 2
+
+¿Chat nuevo o uno existente?
+  1  chat nuevo
+  2  20261012-010101-0001 · 12 turnos · hace 3 h · "deja la tanda verde…"
+Elige [1]: 2
+
+trabajando en /home/usuario/proyectos/mi-web · retomando 20261012-010101-0001
+```
+
+Y a partir de ahí ya no pregunta más: se queda trabajando (con `--supervise`, o sin topes con
+`--hasta-que-pare`).
+
+- **De dónde salen los repos**: la carpeta actual, tu registro `repos.json` (en la raíz de datos)
+  y un escaneo de carpetas con `.git` bajo `AUTONOMA_REPOS` o `--repos-dir RUTA`. El escaneo es
+  corto a propósito (dos niveles): es para una carpeta madre de proyectos, no para un disco entero.
+- **Recordar rutas**: si eliges «otra ruta…» y dices que sí, se guarda en `repos.json` y aparece
+  la próxima vez marcada como `(registro)`.
+- **Saltarse la pregunta**: `--repo RUTA` trabaja ahí sin preguntar. `--elegir` la fuerza incluso
+  sin terminal interactiva.
+- **Elegir repo mueve el proceso** a esa carpeta (`chdir`): las rutas relativas del agente, los
+  comandos que ejecuta y las raíces relativas de tu `approval.json` se refieren al repo elegido.
+  Tus claves, sesiones e informes siguen en la raíz de datos (`--data-dir`), nunca dentro del repo:
+  trabajar en un proyecto ajeno no debe dejar tu `credenciales.txt` en su carpeta.
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

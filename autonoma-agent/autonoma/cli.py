@@ -37,7 +37,15 @@ from autonoma.observability import MetricsRegistry, configure_logging, current_t
 from autonoma.ports import ConsolePort, EventKind
 from autonoma.presentation import approval_heading, operation_preview, safe_text
 from autonoma.runtime import RenderPreferences, RuntimeContext
-from autonoma.sessions import SessionStore
+from autonoma.sessions import SessionInfo, SessionStore
+from autonoma.starter import (
+    ARRANQUE_ENVVAR,
+    REGISTRY_FILENAME,
+    Arranque,
+    aplicar_arranque,
+    bases_del_entorno,
+    resolver_arranque,
+)
 from autonoma.supervisor import (
     STEER_FILENAME,
     STOP_FILENAME,
@@ -102,6 +110,13 @@ Lazo (--supervise)
   --continuar       retoma la corrida anterior donde se cortó (supervisor/estado.json)
   Pararlo desde otra terminal: crea el archivo supervisor/STOP
   Darle una instrucción sin pararlo: escribe supervisor/steer.txt
+
+Arranque (qué repo y qué chat)
+  --repo RUTA       repositorio sobre el que trabajar (sin preguntar)
+  --repos-dir RUTA  carpeta madre que escanear buscando repos (repetible; o AUTONOMA_REPOS)
+  --elegir          preguntar repositorio y chat aunque no haya terminal interactiva
+  Sin --repo, el lazo pregunta: ¿sobre qué repositorio trabajo? ¿chat nuevo o uno existente?
+  Las carpetas que escribas a mano y pidas recordar quedan en repos.json (raíz de datos).
 
 Pánico
   P global es opcional: inicia con --global-hotkey si lo necesitas.
@@ -821,7 +836,7 @@ class Session:
             try:
                 loaded = load_approval_policy(
                     candidate,
-                    default_root=self.settings.root,
+                    default_root=self.settings.workspace,
                     max_bytes=self.settings.approval_policy_max_bytes,
                 )
             except (AutonomaError, ValueError, OSError) as exc:
@@ -1130,6 +1145,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="objetivo leído de un archivo (líneas que empiezan por # se ignoran)",
     )
     parser.add_argument(
+        "--repo",
+        metavar="RUTA",
+        help="repositorio (carpeta) sobre el que trabajar; sin esto, el lazo lo pregunta",
+    )
+    parser.add_argument(
+        "--repos-dir",
+        action="append",
+        metavar="RUTA",
+        help=f"carpeta madre con repos que escanear (repetible; o {ARRANQUE_ENVVAR})",
+    )
+    parser.add_argument(
+        "--elegir",
+        action="store_true",
+        help="preguntar repositorio y chat aunque no haya terminal interactiva",
+    )
+    parser.add_argument(
         "--approval-policy",
         metavar="RUTA",
         help="JSON con el alcance que el usuario delega en modo desatendido (allow-list por herramienta)",
@@ -1409,6 +1440,36 @@ def main(argv: list[str] | None = None) -> None:
         overrides["SUPERVISOR_TOPE_FALLOS"] = str(args.tope_fallos)
     if args.goal_file:
         overrides["SUPERVISOR_GOAL_FILE"] = str(args.goal_file)
+
+    # Arranque asistido: en qué repositorio y con qué chat, antes de irse a segundo plano.
+    # Sólo pregunta si va a trabajar solo (`--supervise`): para un prompt suelto sería ruido.
+    resume = args.resume
+    consola = build_console(context)
+    elegido: Path | None = Path(args.repo).expanduser() if args.repo else None
+    if elegido is None and args.supervise and (sys.stdin.isatty() or args.elegir):
+        _configure_stdio()
+        previos = load_settings(overrides=overrides, data_root=context.data_root, ensure_dirs=False)
+        chats: tuple[SessionInfo, ...] = ()
+        if previos.session_persist:
+            chats = SessionStore(previos.sessions_path()).list()
+        arranque = resolver_arranque(
+            consola,
+            registro=context.root / REGISTRY_FILENAME,
+            bases=bases_del_entorno(extra=[Path(item).expanduser() for item in args.repos_dir or ()]),
+            chats=chats,
+            interactivo=True,
+        )
+        elegido = arranque.repo
+        if arranque.chat and resume is None:
+            resume = arranque.chat
+    if elegido is not None:
+        destino = elegido.expanduser().resolve()
+        if not destino.is_dir():
+            print(f"No existe la carpeta '{destino}'.", file=sys.stderr)
+            raise SystemExit(int(ExitCode.CONFIGURATION))
+        # Desde aquí, las rutas relativas del agente y las raíces de la política son el repo.
+        aplicar_arranque(Arranque(repo=destino, chat=resume, preguntado=True), overrides, consola)
+
     supervise_goal: str | None = None
     if args.supervise:
         try:
@@ -1436,7 +1497,7 @@ def main(argv: list[str] | None = None) -> None:
             allow_commands=bool(args.allow_commands),
             global_hotkey=bool(args.global_hotkey),
             context=context,
-            resume=args.resume,
+            resume=resume,
             attach=tuple(args.attach),
             overrides=overrides,
             supervise=supervise_goal,

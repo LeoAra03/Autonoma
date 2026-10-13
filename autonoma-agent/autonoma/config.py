@@ -226,6 +226,8 @@ class Settings:
     supervisor_continuar: bool = False
     approval_policy_max_bytes: int = 262_144
     root_dir: Path | None = None
+    #: Carpeta donde trabaja el agente (el repositorio elegido). Si es `None`, la raíz de datos.
+    workspace_dir: Path | None = None
     declared_keys: tuple[str, ...] = ()
     dotenv_status: DotEnvStatus = DotEnvStatus.MISSING
     #: Fichero personal detectado (credenciales.txt / mis_claves.txt) y su estado.
@@ -236,6 +238,15 @@ class Settings:
     @property
     def root(self) -> Path:
         return self.root_dir if self.root_dir is not None else project_root()
+
+    @property
+    def workspace(self) -> Path:
+        """Dónde trabaja el agente: el repositorio elegido, o la raíz de datos si no se eligió.
+
+        Separado de `root` a propósito: `root` guarda tus claves, sesiones e informes, y
+        nadie debería mover eso a un repositorio ajeno sólo porque trabajas en él.
+        """
+        return self.workspace_dir if self.workspace_dir is not None else self.root
 
     def _resolve_under_root(self, raw: str, fallback: str) -> Path:
         path = Path(raw).expanduser() if raw else self.root / fallback
@@ -318,6 +329,9 @@ class Settings:
 
     def with_root(self, root: Path) -> Settings:
         return replace(self, root_dir=root)
+
+    def with_workspace(self, workspace: Path) -> Settings:
+        return replace(self, workspace_dir=workspace)
 
     def ensure_directories(self) -> Settings:
         """Crea las carpetas locales (`knowledge_base/`, `logs/`, `sessions/`)."""
@@ -646,6 +660,12 @@ def _coerce_data_root(data_root: DataRootLike) -> DataRoot:
     return DataRoot(path=Path(data_root).expanduser().resolve(), origin=DataOrigin.FLAG)
 
 
+def _ruta_opcional(raw: str) -> Path | None:
+    """Ruta de la configuración, o `None` si no se dijo nada (sentido: usa la raíz de datos)."""
+    texto = (raw or "").strip()
+    return Path(texto).expanduser() if texto else None
+
+
 def load_settings(
     env_path: Path | None = None,
     config_path: Path | None = None,
@@ -717,6 +737,7 @@ def load_settings(
         brave_api_key=_sanitize_key(pick("BRAVE_API_KEY", "brave_api_key")),
         ndus=_sanitize_key(ndus_value),
         knowledge_dir=pick("KNOWLEDGE_DIR", "knowledge_dir"),
+        workspace_dir=_ruta_opcional(pick("WORKSPACE_DIR", "workspace_dir")),
         log_dir=pick("LOG_DIR", "log_dir"),
         sessions_dir=pick("SESSIONS_DIR", "sessions_dir"),
         jobs_dir=pick("JOBS_DIR", "jobs_dir"),

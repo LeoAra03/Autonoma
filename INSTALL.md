@@ -135,6 +135,9 @@ Qué significa cada pieza:
 - **Modo «hasta que yo pare».** Con `--hasta-que-pare` desaparecen el tope de turnos y la ventana de
   tiempo: el lazo sigue hasta que el modelo dice `DONE`, hasta que lo paras o hasta que salta uno de
   los dos frenos. Detalle en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-pare).
+- **Qué repo y qué chat.** Si no pasas `--repo`, el lazo pregunta dónde trabaja (carpeta actual,
+  tu `repos.json` o un escaneo de `AUTONOMA_REPOS`) y si abre un chat nuevo o sigue uno existente.
+  Detalle en [Arranque](autonoma-agent/README.md#arranque-en-qué-repositorio-y-con-qué-chat).
 - **Interrumpirlo.** `Ctrl+C`, o `touch autonoma-agent/supervisor/STOP` desde otra terminal: el lazo se
   corta limpio y los trabajos en segundo plano mueren con él. Para corregir el rumbo sin pararlo, escribe
   en `supervisor/steer.txt`; se lee antes del siguiente turno y se borra.

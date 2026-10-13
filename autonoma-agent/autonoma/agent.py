@@ -839,7 +839,7 @@ def build_approval_policy(settings: Settings) -> ApprovalPolicy | None:
         return None
     return load_approval_policy(
         path,
-        default_root=settings.root,
+        default_root=settings.workspace,
         max_bytes=settings.approval_policy_max_bytes,
         allow_shell_commands=settings.allow_shell_commands,
     )

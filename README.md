@@ -40,7 +40,9 @@ y la clave deja de ser obligatoria.
 
 Puede trabajar solo: `--supervise` encadena turnos sobre un objetivo, y con `--hasta-que-pare` sigue
 hasta que lo paras (`supervisor/STOP`) o el modelo dice `DONE`, con reanudación mediante
-`--continuar`. Detalle en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-pare).
+`--continuar`. Al arrancar pregunta **en qué repositorio** trabaja y **si abre un chat nuevo o sigue
+uno existente**. Detalles en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-pare)
+y [Arranque](autonoma-agent/README.md#arranque-en-qué-repositorio-y-con-qué-chat).
 
 La cookie NDUS es **opcional**. Si la usas y no la tienes a mano (por ejemplo, trabajando dentro de un
 entorno sin navegador), recupérala sin salir del programa:
