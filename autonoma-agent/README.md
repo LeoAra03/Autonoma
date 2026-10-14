@@ -127,6 +127,215 @@ unset NOTRACK_API_KEY                                   # opcional en loopback
 es la firma de un servidor propio, no un permiso para bajar la guardia. Cualquier otro endpoint sin HTTPS se rechaza,
 igual que antes. El `--doctor` lo distingue: en loopback dice que no hace falta clave en lugar de pedirte una.
 
+### Recuperar la cookie NDUS (opcional)
+
+La cookie NDUS es **opcional**: sin ella Autonoma funciona igual. Si la usas, el problema
+práctico es que vive en tu navegador, y en un entorno sin navegador (un sandbox, una VM, CI)
+no hay de dónde sacarla. Tres caminos, del más rápido al más lento:
+
+```bash
+# 1. Pegarla: valor suelto, `ndus=...` o la cabecera Cookie completa del inspector.
+autonoma --ndus "Cookie: ubid-acb=abc; ndus=TU-VALOR; session-token=xyz"
+autonoma --ndus "TU-VALOR"                       # también vale el valor a secas
+NDUS=TU-VALOR autonoma "tu prompt"               # o como variable de entorno
+
+# 2. Importar un archivo: `cookies.txt` exportado por una extensión, o la cabecera pegada.
+autonoma --ndus-file ~/Downloads/cookies.txt
+
+# 3. Que la busque él: lee los almacenes de cookies de Firefox, Chrome, Edge, Brave…
+autonoma --ndus-auto
+
+# Dentro del REPL, lo mismo sin salir de la conversación:
+/ndus              # estado y pegado oculto
+/ndus auto         # buscar en los navegadores de esta máquina
+/ndus archivo RUTA # importar de un cookies.txt
+/ndus ver          # ver el valor enmascarado      /ndus borrar  quitarlo del txt personal
+```
+
+Se guarda en el txt personal (`credenciales.txt`, `mis_claves.txt`…), creándolo con permisos
+0600 si no existe, y reemplazando sólo la línea de la cookie: el resto de tus claves queda
+intacto. El valor **nunca se imprime**: en pantalla verás `VALO…7890 (23 caracteres)`.
+
+Cómo copiarla del navegador: `F12` → Application (Chrome/Edge) o Storage (Firefox) →
+Cookies → el dominio → valor de `ndus` (o copia la cabecera `Cookie:` completa, también sirve).
+
+Detalles que importan:
+
+- Firefox guarda la cookie **en claro** y se lee sin dependencias. Chromium/Chrome/Edge/Brave
+  la cifran: en Windows se intenta con DPAPI y en macOS/Linux con el llavero del sistema;
+  para el cifrado AES hace falta `pip install cryptography`. Si no se puede abrir, se dice
+  que está cifrada (y cómo pegarla a mano) en lugar de fingir que no existía.
+- Los almacenes del navegador sólo se **leen**, nunca se escriben, y se copian a un temporal
+  antes de consultarlos para no chocar con el navegador abierto.
+- En un entorno sin navegador `--ndus-auto` no falla en silencio: lista lo que miró y recuerda
+  que puedes pegarla con `--ndus` o `NDUS=`.
+
+## Modo "hasta que yo pare"
+
+`--supervise` acotado está bien para una tanda concreta (12 turnos / 90 min por defecto, hasta 200
+turnos / 24 h). Pero cuando lo que quieres es **dar una instrucción y que siga hasta que lo pares**,
+el presupuesto es un estorbo. Con `--hasta-que-pare` desaparecen el tope de turnos y la ventana de
+tiempo:
+
+```bash
+autonoma --supervise --hasta-que-pare \
+  --allow-commands --approval-policy approval.json "tu objetivo"
+```
+
+El lazo sigue indefinidamente y **sólo se detiene** por una de estas:
+
+| Motivo | Cómo |
+| --- | --- |
+| Trabajo terminado | el modelo responde `DONE:` |
+| Tú lo paras | `Ctrl+C` en su terminal |
+| Tú lo paras desde fuera | crea el archivo `supervisor/STOP` desde otra terminal |
+| Freno: fallos seguidos | N turnos seguidos con el proveedor caído / clave rota / sin red |
+| Freno: sin avance | N turnos seguidos sin línea de control (`NEXT:`/`DONE:`/`BLOCKED:`) |
+
+Los dos frenos existen para que una avería externa no deje el lazo consumiendo sin avanzar: no son
+un presupuesto, son una red. El de fallos se ajusta con `--tope-fallos N` (por defecto 10) y el de
+turnos sin avance con `SUPERVISOR_MAX_UNPARSABLE` (por defecto 25 en este modo).
+
+**Cómo convivir con él mientras corre** (todo en `supervisor/`, junto al informe):
+
+- `turns.jsonl` — registro continuo: se reescribe en cada turno con el historial completo.
+- `estado.json` — objetivo, turno y paso pendiente. Si se corta (Ctrl+C, cierre, reinicio), retómalo
+  con `autonoma --supervise --continuar --hasta-que-pare`: sigue en el turno siguiente y recupera el
+  paso donde iba, sin repetir lo hecho.
+- `steer.txt` — escribe ahí una instrucción nueva y el lazo la consume en el siguiente turno
+  **sin pararse**. Es como decirle «ahora revisa esto otro» en mitad del trabajo.
+- `STOP` — créalo y el lazo termina limpio al empezar el siguiente turno.
+
+## Arranque: en qué repositorio y con qué chat
+
+Cuando el lazo va a trabajar solo, arranca preguntando **dónde** y **con qué conversación**:
+
+```
+$ autonoma --supervise --hasta-que-pare "deja la tanda verde"
+
+¿Sobre qué repositorio trabajo?
+  1  autonoma      /home/usuario/Autonoma             (actual)
+  2  mi-web        /home/usuario/proyectos/mi-web     (git)
+  3  api-vieja     /home/usuario/proyectos/api-vieja  (registro)
+  4  otra ruta…
+Elige [1]: 2
+
+¿Chat nuevo o uno existente?
+  1  chat nuevo
+  2  20261012-010101-0001 · 12 turnos · hace 3 h · "deja la tanda verde…"
+Elige [1]: 2
+
+trabajando en /home/usuario/proyectos/mi-web · retomando 20261012-010101-0001
+```
+
+Y a partir de ahí ya no pregunta más: se queda trabajando (con `--supervise`, o sin topes con
+`--hasta-que-pare`).
+
+- **De dónde salen los repos**: la carpeta actual, tu registro `repos.json` (en la raíz de datos)
+  y un escaneo de carpetas con `.git` bajo `AUTONOMA_REPOS` o `--repos-dir RUTA`. El escaneo es
+  corto a propósito (dos niveles): es para una carpeta madre de proyectos, no para un disco entero.
+- **Recordar rutas**: si eliges «otra ruta…» y dices que sí, se guarda en `repos.json` y aparece
+  la próxima vez marcada como `(registro)`.
+- **Saltarse la pregunta**: `--repo RUTA` trabaja ahí sin preguntar. `--elegir` la fuerza incluso
+  sin terminal interactiva.
+- **Elegir repo mueve el proceso** a esa carpeta (`chdir`): las rutas relativas del agente, los
+  comandos que ejecuta y las raíces relativas de tu `approval.json` se refieren al repo elegido.
+  Tus claves, sesiones e informes siguen en la raíz de datos (`--data-dir`), nunca dentro del repo:
+  trabajar en un proyecto ajeno no debe dejar tu `credenciales.txt` en su carpeta.
+
+## Verlo, dirigirlo y pararlo desde el celular
+
+Sin instalar nada: el propio Autonoma sirve una página para que la abras desde el navegador del
+teléfono. Ves por dónde va el lazo, le escribes una instrucción nueva y lo paras.
+
+```bash
+# sólo en este equipo (abre la URL que te imprime)
+autonoma --supervise --hasta-que-pare --panel "tu objetivo"
+
+# visible en tu wifi: ábrelo desde el celular con la URL que imprime (lleva el token)
+autonoma --supervise --hasta-que-pare --panel 0.0.0.0 "tu objetivo"
+```
+
+Al arrancar imprime algo como `panel: http://192.168.1.5:8787/?token=…`. Esa dirección es la de tu
+PC en tu red; ábrela en el celular estando en el mismo wifi. La página se refresca cada 10 s.
+
+Lo que puedes hacer desde ahí es exactamente lo mismo que harías en el disco:
+
+| En la página | En disco |
+| --- | --- |
+| Ver estado, turno, resumen y último avance | `supervisor/turns.jsonl` y `supervisor/estado.json` |
+| Escribir una instrucción nueva | `supervisor/steer.txt` |
+| Parar el lazo | `supervisor/STOP` |
+
+Cómo está cerrado, y por qué:
+
+- **Sólo local por defecto.** `--panel` a secas escucha en `127.0.0.1`: desde fuera de tu PC nadie
+  ve nada. Para verlo desde el celular hay que escribirlo (`--panel 0.0.0.0`), y entonces se avisa
+  de que eso es visible en la red.
+- **Token nuevo en cada arranque.** Va en la URL y se exige en todas las rutas; sin él, 401.
+- **No se registran las peticiones.** El token viaja en la URL, así que un log con la URL sería un
+  log con la llave.
+- **Nada se ejecuta desde la web.** Lo único que se puede escribir es `steer.txt` y lo único que se
+  puede crear es `STOP`. No hay botón de comandos ni de shell.
+- **Lo que muestra el modelo se escapa y los secretos conocidos se enmascaran**: esa página se mira
+  desde un teléfono.
+
+Un detalle de Windows: la primera vez que escuche en `0.0.0.0` el firewall preguntará si permitirlo.
+Concédenlo **sólo en redes privadas**, nunca en públicas.
+
+## Un solo comando: `execute`
+
+```bash
+./execute "deja la tanda verde"                      # lazo con el presupuesto por defecto
+./execute "refactoriza el modulo de auth" --hasta-que-pare
+./execute "refactoriza el modulo de auth" --hasta-que-pare --max 15
+./execute "sigue donde ibamos" --hasta-que-pare --continuar
+```
+
+`execute` (y `execute.bat` en Windows) es el atajo del lazo supervisor: le pasas el enunciado entre
+comillas y él hace el resto. Por dentro es `--supervise` más lo que le pidas.
+
+| Flag | Qué hace |
+| --- | --- |
+| `--hasta-que-pare` | sin tope de turnos ni de tiempo: sigue hasta DONE, STOP o Ctrl+C |
+| `--max N` | tope de iteraciones (atajo de `--turns N`) |
+| `--continuar` | retoma la corrida anterior donde se cortó |
+| `--panel 0.0.0.0` | panel para verlo, dirigirlo y pararlo desde el celular |
+| `--sin-panel` | no abrir el panel |
+| `--repo RUTA` | trabajar en ese repositorio sin que pregunte |
+
+**Cómo se para, sin romper nada**: `Ctrl+C` termina al acabar el turno en curso (no a mitad);
+`supervisor/STOP` desde otra terminal hace lo mismo; `supervisor/steer.txt` le da otra instrucción
+**sin pararlo**. En los tres casos el trabajo queda registrado y se retoma con `--continuar`.
+
+## Consumo: el proceso es liviano por diseño
+
+Autonoma no corre modelos: habla con un proveedor por HTTP. Así que su gasto en tu
+máquina es el de un script de consola, y se mantiene ahí con tres decisiones:
+
+- **Nada pesado se importa al arrancar.** `httpx`, `bs4`/`lxml` y `rich`/`markdown-it`
+  se cargan dentro de la función que los necesita. `import autonoma.cli` pasó de
+  **315 ms y 40 MiB a 188 ms y 26 MiB**, y `autonoma --version` de 0,28 s y 38 MiB a 0,20 s y 26 MiB.
+  Comandos como `--version`, `--help` o `--doctor` no cargan ninguna dependencia
+  externa (hay una prueba que lo verifica en un intérprete limpio).
+- **Nada espera dando vueltas.** No hay *busy-wait*: las esperas son `Event.wait` y
+  `poll()` con intervalo, así que el proceso duerme en vez de consumir CPU.
+- **Nada se paraleliza más que la máquina.** Las herramientas de sólo lectura pueden
+  ir en paralelo, pero el pool se queda en el mínimo entre lo que pidió el modelo, lo
+  que permite `MAX_PARALLEL_TOOL_CALLS` (4) y los núcleos que tengas.
+
+Y una más, para cuando lo dejas solo mucho rato:
+
+| Ajuste | Qué hace |
+|--------|----------|
+| `--pausa SEGUNDOS` | respiro entre turnos del lazo (0-3600). `--pausa 0` lo quita. |
+| `--hasta-que-pare` | sin tope de turnos ni de tiempo; **le aplica una pausa de 2 s por defecto** para no tener el proceso y la red clavados durante horas. |
+| `SUPERVISOR_IDLE_SECONDS` | lo mismo, en el entorno, `.env` o `config.json`. Si ya lo fijaste tú, eso manda y no se te impone ningún valor. |
+
+Al terminar, el lazo dice cuánto pesó: `lazo: detenido por el archivo STOP · 3 turnos ·
+pico 35 MiB`. Es la memoria máxima del proceso, medida con `psutil` (y sin él, con
+`resource`).
+
 ## Seguridad y privacidad
 
 - Las herramientas locales del **Agent** requieren confirmar sus argumentos completos escribiendo `SI`.

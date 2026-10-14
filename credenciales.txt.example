@@ -20,7 +20,13 @@ NOTRACK_API_KEY=pega-aqui-tu-clave-de-notrack
 # BRAVE_API_KEY=pega-aqui-tu-clave-brave
 
 # ── Cookie personal NDUS (Amazon u otro servicio) ──
-# Para que el agente pueda usar tu sesión si lo necesitas.
+# OPCIONAL: sin ella Autonoma funciona igual.
+# Para no ir a buscarla a mano, usa uno de estos atajos (la guardan aquí mismo):
+#   autonoma --ndus "Cookie: ndus=TU-VALOR; ..."     (o el valor a secas)
+#   autonoma --ndus-file ~/Downloads/cookies.txt     (cookies.txt exportado)
+#   autonoma --ndus-auto                             (la busca en tus navegadores)
+#   /ndus · /ndus auto · /ndus archivo RUTA · /ndus ver · /ndus borrar   (dentro del REPL)
+#   NDUS=TU-VALOR autonoma "prompt"                  (o como variable de entorno)
 # Puedes pegarlo de 3 formas, todas funcionan:
 #   NDUS=tu-valor-largo-aqui
 #   Cookie: ndus=tu-valor-largo-aqui; ubid-acb=...

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from autonoma.errors import ConfigurationError
+from autonoma.ndus import extract_ndus, is_real_ndus
 from autonoma.runtime import DataOrigin, DataRoot, RenderPreferences, RuntimeContext, resolve_data_root
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "NumericBound",
     "PersonalFile",
     "Settings",
+    "clear_ndus",
     "context_for",
     "dump_public_config",
     "find_personal_file",
@@ -39,6 +41,7 @@ __all__ = [
     "read_dotenv_file",
     "read_personal_file",
     "save_api_keys",
+    "save_ndus",
 ]
 
 DEFAULT_NOTRACK_BASE_URL: Final[str] = "https://api.notrack.ai/v1"
@@ -171,6 +174,8 @@ NUMERIC_BOUNDS: Final[tuple[NumericBound, ...]] = (
     NumericBound("supervisor_max_turns", "int", 1, 200, 12),
     NumericBound("supervisor_max_minutes", "float", 1, 1_440, 90.0),
     NumericBound("supervisor_idle_seconds", "float", 0, 3_600, 0.0),
+    # Freno del modo "hasta que pare": fallos duros seguidos tolerados antes de rendirse.
+    NumericBound("supervisor_tope_fallos", "int", 1, 1_000, 10),
     NumericBound("approval_policy_max_bytes", "int", 1_024, 1_048_576, 262_144),
 )
 
@@ -213,8 +218,16 @@ class Settings:
     supervisor_max_minutes: float = 90.0
     supervisor_idle_seconds: float = 0.0
     supervisor_stop_on_block: bool = True
+    #: Lazo sin tope de turnos ni de tiempo: sólo corta DONE, `STOP`, Ctrl+C o el freno.
+    supervisor_hasta_que_pare: bool = False
+    #: Fallos duros seguidos que se toleran en el modo "hasta que pare".
+    supervisor_tope_fallos: int = 10
+    #: Retomar la corrida anterior del lazo donde se cortó (`supervisor/estado.json`).
+    supervisor_continuar: bool = False
     approval_policy_max_bytes: int = 262_144
     root_dir: Path | None = None
+    #: Carpeta donde trabaja el agente (el repositorio elegido). Si es `None`, la raíz de datos.
+    workspace_dir: Path | None = None
     declared_keys: tuple[str, ...] = ()
     dotenv_status: DotEnvStatus = DotEnvStatus.MISSING
     #: Fichero personal detectado (credenciales.txt / mis_claves.txt) y su estado.
@@ -225,6 +238,15 @@ class Settings:
     @property
     def root(self) -> Path:
         return self.root_dir if self.root_dir is not None else project_root()
+
+    @property
+    def workspace(self) -> Path:
+        """Dónde trabaja el agente: el repositorio elegido, o la raíz de datos si no se eligió.
+
+        Separado de `root` a propósito: `root` guarda tus claves, sesiones e informes, y
+        nadie debería mover eso a un repositorio ajeno sólo porque trabajas en él.
+        """
+        return self.workspace_dir if self.workspace_dir is not None else self.root
 
     def _resolve_under_root(self, raw: str, fallback: str) -> Path:
         path = Path(raw).expanduser() if raw else self.root / fallback
@@ -298,11 +320,18 @@ class Settings:
             brave_api_key=self.brave_api_key if brave is None else brave.strip(),
         )
 
+    def with_ndus(self, ndus: str) -> Settings:
+        """Reemplaza la cookie NDUS en memoria; el guardado en disco lo hace `save_ndus`."""
+        return replace(self, ndus=(ndus or "").strip())
+
     def with_allow_commands(self, *, allow: bool) -> Settings:
         return replace(self, allow_commands=bool(allow))
 
     def with_root(self, root: Path) -> Settings:
         return replace(self, root_dir=root)
+
+    def with_workspace(self, workspace: Path) -> Settings:
+        return replace(self, workspace_dir=workspace)
 
     def ensure_directories(self) -> Settings:
         """Crea las carpetas locales (`knowledge_base/`, `logs/`, `sessions/`)."""
@@ -357,13 +386,25 @@ def _normalize_personal_key(raw: str) -> str:
     return raw.strip().upper().replace("-", "_").replace(" ", "_").replace(".", "_")
 
 
-def _extract_ndus(value: str) -> str | None:
-    """Extrae `ndus=...` de una cadena tipo Cookie, o None si no hay patrón."""
-    text = value.strip()
-    match = re.search(r"ndus\s*=\s*([^;,\s\"']+)", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip().strip("\"'")
-    return None
+#: Extracción canónica de la cookie: vive en `autonoma.ndus` junto al resto del
+#: importador (cabeceras, JSON del inspector, `cookies.txt`). Aquí sólo se reexporta
+#: con el nombre histórico para no romper a quien ya lo importara.
+_extract_ndus = extract_ndus
+
+_PERSONAL_HEADER: Final[str] = (
+    "# Autonoma — credenciales personales. No compartir ni subir a git.\n"
+    "# Formato: CLAVE=valor (una por línea). Las líneas con # son comentarios.\n"
+)
+#: Línea del txt personal que guarda la cookie: `NDUS=…`, `COOKIE=…`, `AMAZON_NDUS=…`
+_PERSONAL_NDUS_KEY: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:NDUS|COOKIE_NDUS|AMAZON_NDUS|AMZ_NDUS|NDUS_COOKIE|COOKIE)\s*=",
+    re.IGNORECASE,
+)
+#: `ndus=…` dentro de una línea (p. ej. `Cookie: ubid=x; ndus=…; otros=…`)
+_PERSONAL_NDUS_TOKEN: Final[re.Pattern[str]] = re.compile(
+    r"(?P<prefix>ndus\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^;,)\s\"']+)(?P=quote)",
+    re.IGNORECASE,
+)
 
 
 def read_personal_file(path: Path) -> dict[str, str]:
@@ -387,7 +428,7 @@ def read_personal_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith(";") or line.startswith("//"):
+        if not line or line.startswith(("#", ";", "//")):
             continue
         # Extracción prioritaria de NDUS si la línea es tipo Cookie: ndus=...  o NDUS=...
         # Esto evita que `Cookie: ndus=ABC` se parta por `=` en `COOKIE:_NDUS`
@@ -398,7 +439,7 @@ def read_personal_file(path: Path) -> dict[str, str]:
                 values["NDUS"] = extracted
                 low = line.lower().strip()
                 # Si la línea es principalmente una cookie/ndus, ya está procesada
-                if low.startswith("cookie") or low.startswith("ndus") or low.startswith("ndus_cookie") or "cookie:" in low:
+                if low.startswith(("cookie", "ndus", "ndus_cookie")) or "cookie:" in low:
                     continue
                 # Si la línea parece ser `NDUS=valor` pura (clave simple), también continuar
                 # para no reprocesarla como genérica
@@ -446,15 +487,13 @@ def read_personal_file(path: Path) -> dict[str, str]:
             if ndus:
                 values["NDUS"] = ndus
                 continue
-        if len(line) >= 24 and " " not in line and "\t" not in line:
-            if ";" not in line and "," not in line:
-                if "NOTRACK_API_KEY" not in values:
-                    if line.startswith("sk-") or line.startswith("nt-") or len(line) >= 30:
-                        values["NOTRACK_API_KEY"] = line.strip("\"'")
-                        continue
-                if "NDUS" not in values and len(line) >= 40:
-                    values["NDUS"] = line.strip("\"'")
-                    continue
+        if len(line) >= 24 and " " not in line and "\t" not in line and ";" not in line and "," not in line:
+            if "NOTRACK_API_KEY" not in values and (line.startswith(("sk-", "nt-")) or len(line) >= 30):
+                values["NOTRACK_API_KEY"] = line.strip("\"'")
+                continue
+            if "NDUS" not in values and len(line) >= 40:
+                values["NDUS"] = line.strip("\"'")
+                continue
     return values
 
 
@@ -465,11 +504,7 @@ def find_personal_file(base_dir: Path, env: Mapping[str, str] | None = None) -> 
         raw = (source.get(var) or "").strip()
         if raw:
             candidate = Path(raw).expanduser()
-            if not candidate.is_absolute():
-                candidate = (base_dir / candidate).resolve()
-            else:
-                candidate = candidate.resolve()
-            return candidate
+            return ((base_dir / candidate) if not candidate.is_absolute() else candidate).resolve()
     search_dirs: list[Path] = []
     try:
         resolved_base = base_dir.resolve()
@@ -502,9 +537,7 @@ def find_personal_file(base_dir: Path, env: Mapping[str, str] | None = None) -> 
     return None
 
 
-def personal_file_payload(
-    path: Path | None, *, env: Mapping[str, str] | None = None
-) -> tuple[dict[str, str], DotEnvStatus, str]:
+def personal_file_payload(path: Path | None) -> tuple[dict[str, str], DotEnvStatus, str]:
     """Lee el personal si existe; devuelve (valores, estado, ruta_str)."""
     if path is None:
         return {}, DotEnvStatus.MISSING, ""
@@ -532,9 +565,7 @@ def _is_real_key(value: str) -> bool:
     text = (value or "").strip()
     if not text or text in _PLACEHOLDERS:
         return False
-    if "pega-aqui" in text.lower():
-        return False
-    return True
+    return "pega-aqui" not in text.lower()
 
 
 def _unquote(value: str) -> str:
@@ -629,6 +660,12 @@ def _coerce_data_root(data_root: DataRootLike) -> DataRoot:
     return DataRoot(path=Path(data_root).expanduser().resolve(), origin=DataOrigin.FLAG)
 
 
+def _ruta_opcional(raw: str) -> Path | None:
+    """Ruta de la configuración, o `None` si no se dijo nada (sentido: usa la raíz de datos)."""
+    texto = (raw or "").strip()
+    return Path(texto).expanduser() if texto else None
+
+
 def load_settings(
     env_path: Path | None = None,
     config_path: Path | None = None,
@@ -684,7 +721,7 @@ def load_settings(
         process_env.get("NDUS")
         or dotenv.values.get("NDUS")
         or personal_values.get("NDUS")
-        or _normalize_json_value(json_values.get("ndus", ""))  # type: ignore[arg-type]
+        or _normalize_json_value(json_values.get("ndus", ""))
         or ""
     )
     def _sanitize_key(value: str) -> str:
@@ -700,6 +737,7 @@ def load_settings(
         brave_api_key=_sanitize_key(pick("BRAVE_API_KEY", "brave_api_key")),
         ndus=_sanitize_key(ndus_value),
         knowledge_dir=pick("KNOWLEDGE_DIR", "knowledge_dir"),
+        workspace_dir=_ruta_opcional(pick("WORKSPACE_DIR", "workspace_dir")),
         log_dir=pick("LOG_DIR", "log_dir"),
         sessions_dir=pick("SESSIONS_DIR", "sessions_dir"),
         jobs_dir=pick("JOBS_DIR", "jobs_dir"),
@@ -719,6 +757,9 @@ def load_settings(
         supervisor_idle_seconds=float(numerics["supervisor_idle_seconds"]),
         approval_policy_max_bytes=int(numerics["approval_policy_max_bytes"]),
         supervisor_stop_on_block=_as_bool(pick("SUPERVISOR_STOP_ON_BLOCK", "supervisor_stop_on_block", "true")),
+        supervisor_hasta_que_pare=_as_bool(pick("SUPERVISOR_HASTA_QUE_PARE", "supervisor_hasta_que_pare", "false")),
+        supervisor_continuar=_as_bool(pick("SUPERVISOR_CONTINUAR", "supervisor_continuar", "false")),
+        supervisor_tope_fallos=int(numerics["supervisor_tope_fallos"]),
         session_persist=_as_bool(pick("SESSION_PERSIST", "session_persist", "true")),
         allow_private_network=_as_bool(pick("ALLOW_PRIVATE_NETWORK", "allow_private_network", "false")),
         allow_shell_commands=_as_bool(pick("ALLOW_SHELL_COMMANDS", "allow_shell_commands", "false")),
@@ -770,6 +811,149 @@ def save_api_keys(
         return {}
     _write_dotenv_file(env_path or project_root() / ".env", payload)
     return payload
+
+
+# --------------------------------------------------------------------------- NDUS
+def _validate_ndus(value: str) -> str:
+    """La cookie debe ser un valor plausible: ni plantilla, ni truncado, ni multilínea."""
+    text = (value or "").strip()
+    if not text:
+        raise ConfigurationError(
+            "NDUS vacía: pega el valor de la cookie, `ndus=valor` o la cabecera Cookie completa",
+            context={"setting": "NDUS"},
+        )
+    if any(char in text for char in _DOTENV_FORBIDDEN_VALUE_CHARS):
+        raise ConfigurationError(
+            "La NDUS no puede contener saltos de línea: copia sólo el valor de la cookie",
+            context={"setting": "NDUS"},
+        )
+    if not is_real_ndus(text):
+        raise ConfigurationError(
+            "La NDUS parece una plantilla o está truncada: copia el valor completo de la cookie",
+            context={"setting": "NDUS"},
+        )
+    return text
+
+
+def _personal_target_path(
+    personal_path: Path | None,
+    root: Path | None,
+    env: Mapping[str, str] | None,
+) -> Path:
+    """Dónde escribir: el txt personal ya existente, o `credenciales.txt` en la raíz."""
+    if personal_path is not None:
+        return personal_path.expanduser()
+    base = root if root is not None else project_root()
+    found = find_personal_file(base, env)
+    return found if found is not None else base / _PERSONAL_FILENAMES[0]
+
+
+def _is_ndus_line(line: str) -> bool:
+    """¿Esta línea del txt personal guarda la cookie? (comentarios aparte)."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith(("#", ";", "//")):
+        return False
+    return "ndus=" in stripped.lower() or bool(_PERSONAL_NDUS_KEY.match(stripped))
+
+
+def _replace_ndus_in_line(line: str, value: str) -> str:
+    """Sustituye el valor conservando la forma de la línea (`Cookie: …` o `NDUS=…`)."""
+    if _PERSONAL_NDUS_TOKEN.search(line):
+        return _PERSONAL_NDUS_TOKEN.sub(lambda match: f"{match.group('prefix')}{value}", line, count=1)
+    return f"NDUS={value}"
+
+
+def _rewrite_personal_ndus(existing: str, value: str | None) -> str:
+    """Reescribe el txt personal: `value=None` borra la cookie; si no había línea, la añade."""
+    lines = existing.splitlines()
+    output: list[str] = []
+    replaced = False
+    for line in lines:
+        if not _is_ndus_line(line):
+            output.append(line)
+            continue
+        if value is None:
+            continue
+        if replaced:
+            output.append(f"# {line.strip()}  (NDUS duplicada; se conserva la primera)")
+            continue
+        output.append(_replace_ndus_in_line(line, value))
+        replaced = True
+    if value is not None and not replaced:
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"NDUS={value}")
+    return "\n".join(output).strip("\n")
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    """Escritura atómica con permisos 0600 desde el temporal: el secreto nunca queda suelto."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".personal-", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        if os.name != "nt":
+            os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        raise ConfigurationError(
+            f"No se pudo escribir {path.name}: el sistema de archivos lo impidió",
+            context={"error": type(exc).__name__},
+        ) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            temporary_path.unlink(missing_ok=True)
+
+
+def _persist_personal_ndus(path: Path, value: str | None) -> None:
+    """Aplica el cambio sobre el txt personal preservando el resto de claves."""
+    existing = ""
+    if path.is_file():
+        try:
+            existing = path.read_text(encoding="utf-8", errors="replace")[:_MAX_PERSONAL_CHARS]
+        except OSError as exc:
+            raise ConfigurationError(
+                f"No se pudo leer {path.name}; revisa permisos",
+                context={"error": type(exc).__name__},
+            ) from exc
+    if not existing.strip():
+        existing = _PERSONAL_HEADER
+    body = _rewrite_personal_ndus(existing, value)
+    _write_text_atomic(path, f"{body}\n" if body.strip() else _PERSONAL_HEADER)
+
+
+def save_ndus(
+    ndus: str,
+    *,
+    personal_path: Path | None = None,
+    root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Guarda la cookie NDUS en el txt personal; devuelve la ruta escrita.
+
+    Va al txt personal y no a `.env` porque es el sitio documentado para pegar la
+    cookie a mano, y porque `.env` gana en prioridad: escribir allí dejaría fuera de
+    juego al archivo del usuario. El llamador aplica el valor como override si quiere
+    usarlo en la sesión en curso sin recargar de disco.
+    """
+    value = _validate_ndus(ndus)
+    path = _personal_target_path(personal_path, root, env)
+    _persist_personal_ndus(path, value)
+    return path
+
+
+def clear_ndus(
+    *,
+    personal_path: Path | None = None,
+    root: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Borra la cookie del txt personal; el resto de claves queda intacto."""
+    path = _personal_target_path(personal_path, root, env)
+    _persist_personal_ndus(path, None)
+    return path
 
 
 def dump_public_config(settings: Settings) -> dict[str, Any]:

@@ -28,6 +28,7 @@ from autonoma.cli import (
     main,
     maybe_pause_on_exit,
     parse_args,
+    pausa_ya_configurada,
     print_banner,
     repl,
     should_pause_on_exit,
@@ -38,6 +39,7 @@ from autonoma.errors import ConfigurationError, ExitCode
 from autonoma.key_handler import ListenerState, ListenerStatus
 from autonoma.observability import MetricsRegistry
 from autonoma.runtime import DataOrigin, DataRoot, RenderPreferences, RuntimeContext
+from autonoma.supervisor import STOP_FILENAME, SupervisorState
 
 
 class RecordingConsole:
@@ -331,6 +333,74 @@ def test_brave_key_is_persisted_and_the_agent_rebuilt(made_session, monkeypatch:
     assert rebuilt == [1]
     assert session.settings.has_brave_key
     assert "actualizada" in console.text
+
+
+@pytest.fixture
+def ndus_aislado(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Aísla el disco: ni el `credenciales.txt` del repo ni el HOME de quien ejecuta."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    return tmp_path
+
+
+_NDUS_VALUE = "abc123XYZ789prueba-ndus-000111222333"
+_NDUS_HEADER = f"Cookie: ubid-acb=abc123; ndus={_NDUS_VALUE}; session-token=zzz"
+
+
+def test_ndus_command_imports_masks_and_persists(made_session, ndus_aislado: Path) -> None:
+    """El atajo: una línea pega la cookie, la deja vigente y no la imprime entera."""
+    session, console, _, _ = made_session()
+    assert session.handle_command(f"/ndus {_NDUS_HEADER}") is True
+    stored = (ndus_aislado / "credenciales.txt").read_text(encoding="utf-8")
+    assert f"NDUS={_NDUS_VALUE}" in stored
+    assert _NDUS_VALUE not in console.text
+    assert "…" in console.text  # sólo la máscara
+    assert session.settings.ndus == _NDUS_VALUE  # vigente sin recargar de disco
+
+
+def test_ndus_command_archivo_imports_and_clear_removes_it(made_session, ndus_aislado: Path) -> None:
+    source = ndus_aislado / "cookies.txt"
+    source.write_text(f".example.com\tTRUE\t/\tFALSE\t1767225600\tndus\t{_NDUS_VALUE}\n", encoding="utf-8")
+    session, _console, _, _ = made_session()
+    assert session.handle_command(f"/ndus archivo {source}") is True
+    assert session.settings.has_ndus
+    assert session.handle_command("/ndus borrar") is True
+    assert not session.settings.has_ndus
+    assert "NDUS" not in (ndus_aislado / "credenciales.txt").read_text(encoding="utf-8")
+
+
+def test_ndus_command_archivo_without_path_explains(made_session) -> None:
+    session, console, _, _ = made_session()
+    assert session.handle_command("/ndus archivo") is True
+    assert "falta la ruta" in console.text
+
+
+def test_ndus_without_tty_teaches_how_to_copy_it(made_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """En un entorno sin navegador ni terminal, lo único útil es decir cómo pegarla."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    session, console, _, _ = made_session()
+    assert session.handle_command("/ndus") is True
+    assert "/ndus <valor>" in console.text
+    assert "NDUS=valor" in console.text
+
+
+def test_ndus_auto_without_browser_warns_and_writes_nothing(
+    made_session, ndus_aislado: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("autonoma.cli.probe_sources", list)
+    session, console, _, _ = made_session()
+    assert session.handle_command("/ndus auto") is True
+    assert not (ndus_aislado / "credenciales.txt").exists()
+    assert "No se encontró NDUS" in console.text
+
+
+def test_ndus_ver_never_prints_the_value(made_session) -> None:
+    session, console, _, _ = made_session()
+    session.settings = session.settings.with_ndus(_NDUS_VALUE)
+    assert session.handle_command("/ndus ver") is True
+    assert _NDUS_VALUE not in console.text
+    assert "…" in console.text
 
 
 def test_kb_command_lists_notes_or_says_it_is_empty(made_session) -> None:
@@ -1015,6 +1085,164 @@ def test_sin_modelo_el_lazo_no_quema_turnos(made_session, tmp_path: Path) -> Non
     assert agent.prompts == []
     informe = tmp_path / "supervisor" / "turns.jsonl"
     assert json.loads(informe.read_text(encoding="utf-8"))["stopped_by"] == "modelo sin configurar"
+
+
+def test_hasta_que_pare_se_anuncia_y_explica_como_pararlo(made_session, tmp_path: Path) -> None:
+    """El modo nuevo tiene que decir cómo se para: si no, es una trampa."""
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, supervisor_hasta_que_pare=True)
+    agent = ScriptAgent(["paso 1\nNEXT: paso 2", "paso 2\nDONE: terminado"])
+    session, console, _runtime, _fake = made_session(agent=agent, settings=settings)
+    outcome = session.run_supervised("objetivo")
+    assert outcome.state == "done"
+    assert len(agent.prompts) == 2  # el tope de turnos no cortó nada
+    assert "HASTA QUE YO PARE" in console.text
+    assert "STOP" in console.text and "steer.txt" in console.text
+    assert "--continuar" in console.text
+
+
+def test_continuar_reanuda_el_paso_pendiente_de_la_corrida_anterior(made_session, tmp_path: Path) -> None:
+    """Reanudar no empieza de cero: recupera el objetivo, el turno y el paso pendiente."""
+    directorio = tmp_path / "supervisor"
+    SupervisorState(goal="objetivo guardado", turno=4, continuation="revisar el paso 5", actualizado="2026-10-12T00:00:00+00:00").save(directorio)
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, supervisor_continuar=True)
+    agent = ScriptAgent(["DONE: terminado"])
+    session, console, _runtime, _fake = made_session(agent=agent, settings=settings)
+    outcome = session.run_supervised("objetivo guardado")
+    assert outcome.state == "done"
+    assert "continuando la corrida anterior" in console.text
+    assert "revisar el paso 5" in agent.prompts[0]  # el paso pendiente vuelve al prompt
+    assert outcome.report.turns[0].index == 5  # sigue la numeración, no vuelve a 1
+
+
+def test_continuar_sin_corrida_previa_avisa_y_arranca_de_cero(made_session, tmp_path: Path) -> None:
+    """Sin `estado.json` no hay nada que retomar: se dice y se sigue, no se falla en silencio."""
+    settings = Settings(notrack_api_key="sk-probe-123456", root_dir=tmp_path, supervisor_continuar=True)
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["DONE: ya"]), settings=settings)
+    outcome = session.run_supervised("objetivo")
+    assert outcome.state == "done"
+    assert "no hay una corrida anterior" in console.text
+
+
+def test_los_flags_del_lazo_se_validan() -> None:
+    """Cada flag nueva dice qué le falta en vez de ignorarse sin más."""
+    with pytest.raises(SystemExit):
+        parse_args(["--hasta-que-pare", "objetivo"])
+    with pytest.raises(SystemExit):
+        parse_args(["--continuar"])
+    with pytest.raises(SystemExit):
+        parse_args(["--supervise", "--hasta-que-pare", "--turns", "5", "objetivo"])
+    with pytest.raises(SystemExit):
+        parse_args(["--supervise", "--tope-fallos", "5", "objetivo"])
+    with pytest.raises(SystemExit):
+        parse_args(["--supervise"])
+    # Con --continuar el objetivo sale de la corrida anterior, así que no es obligatorio.
+    args = parse_args(["--supervise", "--continuar"])
+    assert args.continuar and args.supervise
+    # Y el modo hasta que pare se puede ajustar sin tocar el código.
+    args = parse_args(["--supervise", "--hasta-que-pare", "--tope-fallos", "25", "objetivo"])
+    assert args.hasta_que_pare and args.tope_fallos == 25
+
+
+def test_la_pausa_del_lazo_se_valida_y_se_apaga() -> None:
+    """`--pausa 0` es una orden, no un valor ausente: apaga el respiro del modo largo."""
+    with pytest.raises(SystemExit):  # sin --supervise no significa nada
+        parse_args(["--pausa", "5", "objetivo"])
+    with pytest.raises(SystemExit):  # fuera de rango
+        parse_args(["--supervise", "--pausa", "99999", "objetivo"])
+    args = parse_args(["--supervise", "--hasta-que-pare", "--pausa", "0", "objetivo"])
+    assert args.pausa == 0.0
+    args = parse_args(["--supervise", "--pausa", "1.5", "objetivo"])
+    assert args.pausa == 1.5
+    # Sin --pausa no se inventa nada: el valor por defecto lo decide `main` mirando la config.
+    assert parse_args(["--supervise", "--hasta-que-pare", "objetivo"]).pausa is None
+
+
+def test_pausa_ya_configurada_respeta_lo_que_escribio_la_persona(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """El respiro por defecto no pisa una pausa que ya estaba configurada."""
+    monkeypatch.delenv("SUPERVISOR_IDLE_SECONDS", raising=False)
+    assert pausa_ya_configurada(tmp_path) is False
+    (tmp_path / ".env").write_text("SUPERVISOR_IDLE_SECONDS=9\n", encoding="utf-8")
+    assert pausa_ya_configurada(tmp_path) is True
+    monkeypatch.setenv("SUPERVISOR_IDLE_SECONDS", "0")
+    assert pausa_ya_configurada(tmp_path) is True
+
+
+def test_main_aplica_el_repo_elegido(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`--repo`: el proceso se mueve al repo y el ajuste viaja a la sesión."""
+    repo = tmp_path / "alpha"
+    repo.mkdir()
+    monkeypatch.chdir(tmp_path)
+    capturado: dict[str, object] = {}
+    monkeypatch.setattr("autonoma.cli.repl", lambda once=None, **kwargs: capturado.update(kwargs) or 0)
+    monkeypatch.setattr("autonoma.cli.maybe_pause_on_exit", lambda args: None)
+    with pytest.raises(SystemExit) as salida:
+        main(["--repo", str(repo), "--data-dir", str(tmp_path), "hola"])
+    assert salida.value.code == 0
+    assert capturado["overrides"]["WORKSPACE_DIR"] == str(repo.resolve())
+    assert Path.cwd().resolve() == repo.resolve()
+
+
+def test_main_rechaza_un_repo_que_no_existe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("autonoma.cli.maybe_pause_on_exit", lambda args: None)
+    with pytest.raises(SystemExit) as salida:
+        main(["--supervise", "--repo", str(tmp_path / "no-está"), "--data-dir", str(tmp_path), "objetivo"])
+    assert salida.value.code == int(ExitCode.CONFIGURATION)
+
+
+def test_main_pregunta_repo_y_chat_cuando_el_lazo_va_solo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sin `--repo`, el lazo pregunta dónde trabaja y con qué conversación sigue."""
+    madre = tmp_path / "madre"
+    (madre / "alpha" / ".git").mkdir(parents=True)
+    sesiones = tmp_path / "sessions"
+    sesiones.mkdir()
+    (sesiones / "20261012-010101-0001.jsonl").write_text(
+        json.dumps({"role": "user", "content": "clasificar facturas", "at": 1}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTONOMA_REPOS", str(madre))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    class ConsolaGuionada:
+        def __init__(self) -> None:
+            self.lineas: list[str] = []
+
+        def print(self, *objects: object, **kwargs: object) -> None:
+            self.lineas.append(" ".join(str(o) for o in objects))
+
+        def input(self, prompt: str = "") -> str:
+            respuestas = {"Elige": iter(["2", "2"])}
+            for clave, valores in respuestas.items():
+                if prompt.startswith(clave):
+                    return next(valores)
+            return ""
+
+    consola = ConsolaGuionada()
+    monkeypatch.setattr("autonoma.cli.build_console", lambda context: consola)
+    capturado: dict[str, object] = {}
+    monkeypatch.setattr("autonoma.cli.repl", lambda once=None, **kwargs: capturado.update(kwargs) or 0)
+    monkeypatch.setattr("autonoma.cli.maybe_pause_on_exit", lambda args: None)
+
+    with pytest.raises(SystemExit) as salida:
+        main(["--supervise", "--data-dir", str(tmp_path), "organiza el repo"])
+    assert salida.value.code == 0
+    # 2 = alpha (1 era la carpeta actual), 2 = el chat existente
+    assert capturado["resume"] == "20261012-010101-0001"
+    assert capturado["overrides"]["WORKSPACE_DIR"] == str((madre / "alpha").resolve())
+    assert Path.cwd().resolve() == (madre / "alpha").resolve()
+
+
+def test_report_supervised_distingue_el_stop_del_presupuesto_agotado(made_session) -> None:
+    """Pararlo con `STOP` es una salida querida, no un presupuesto agotado: se dice distinto."""
+    session, console, _runtime, _agent = made_session(agent=ScriptAgent(["NEXT: sigo"]))
+    outcome = session.run_supervised("objetivo")
+    (session.settings.supervisor_path() / STOP_FILENAME).write_text("para", encoding="utf-8")
+    session.report_supervised(outcome)
+    assert "lazo:" in console.text
 
 
 def test_report_supervised_cierra_con_resumen(made_session) -> None:

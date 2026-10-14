@@ -96,6 +96,26 @@ jobs:
           fi
           exit "$code"
       - run: autonoma --version
+  arena-web:
+    name: "arena-web (sondeo por CDP)"
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Sin Playwright a propósito: el sondeo se prueba contra una página falsa, así
+      # que este gate corre sin navegador, en segundos, y no descarga nada.
+      - run: python -m pip install pytest "ruff>=0.6,<1" "mypy>=1.11,<3"
+      - name: Lint (ruff, extendiendo la configuración del proyecto)
+        working-directory: arena-web
+        run: ruff check .
+      - name: Tipos (mypy --strict, desde la configuración del directorio)
+        working-directory: arena-web
+        run: mypy
+      - name: Pruebas del sondeo
+        run: python -m pytest arena-web/tests -q
   locked-linux:
     runs-on: ubuntu-latest
     steps:

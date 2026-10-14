@@ -1,0 +1,7 @@
+# Control del navegador por CDP: no hace falta `playwright install`, nos adjuntamos
+# al Brave que ya corre, así que no se descarga ningún navegador.
+playwright>=1.49,<2
+# `tomllib` es de 3.11+; en 3.10 hace falta este backport.
+tomli>=2,<3; python_version < "3.11"
+# Para correr las pruebas de este directorio: python -m pytest tests
+pytest>=9,<10

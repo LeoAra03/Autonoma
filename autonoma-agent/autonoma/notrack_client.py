@@ -19,10 +19,15 @@ import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Final, TypeVar
+from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
 
-import httpx
+# `httpx` se importa DENTRO de las funciones que abren la conexión, no aquí: cargarlo
+# cuesta ~40 ms y ~13 MiB, y comandos como `--version`, `--help` o `--doctor` no hablan
+# con el proveedor. Las anotaciones son texto (`from __future__ import annotations`),
+# así que el tipado sigue funcionando igual.
+if TYPE_CHECKING:  # sólo para el tipado: en runtime se importa dentro de las funciones
+    import httpx
 
 from autonoma.config import DEFAULT_NOTRACK_BASE_URL, DEFAULT_NOTRACK_MODEL
 from autonoma.errors import (
@@ -140,6 +145,8 @@ class NoTrackClient:
         return bool(self.api_key) or self.local_endpoint
 
     def ensure_client(self) -> httpx.Client:
+        import httpx
+
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(
                 base_url=self.base_url,
@@ -164,6 +171,8 @@ class NoTrackClient:
 
     def close(self) -> None:
         """Cierra el cliente y desregistra su propia limpieza (dobles cierres: seguros)."""
+        import httpx
+
         self.panic.unregister_cleanup(self.close)
         client, self._client = self._client, None
         if client is not None and not client.is_closed:
@@ -221,6 +230,8 @@ class NoTrackClient:
         `allow_retry` corta el reintento cuando ya se entregó algo al usuario, para
         no duplicar texto en streaming.
         """
+        import httpx
+
         attempts = self.max_retries + 1
         last_error: BaseException | None = None
         for attempt in range(attempts):

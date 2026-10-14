@@ -101,6 +101,17 @@ autonoma "tu instrucción"
 
 ---
 
+## 4b) El atajo: `execute`
+
+```bash
+./execute "tu objetivo" --hasta-que-pare     # Linux/macOS
+execute "tu objetivo" --hasta-que-pare       # Windows
+```
+
+Es el lazo supervisor con un nombre: el enunciado entre comillas y las flags que quieras
+(`--max N`, `--continuar`, `--panel 0.0.0.0`, `--repo RUTA`). Se para con Ctrl+C o con
+`supervisor/STOP`, y se retoma con `--continuar`.
+
 ## 5) Dejarlo correr solo (modo desatendido)
 
 Pensado para «que se encargue él mientras hago otra cosa». El lazo supervisor encadena turnos sobre
@@ -132,6 +143,15 @@ Qué significa cada pieza:
   a un shell o escribir sobre un dispositivo de bloque se niegan siempre, aunque la política los nombre.
 - **Topes y salida legible.** `--turns N` (turnos máximos) y `--minutes N` (ventana). El lazo termina con
   código `0` si hubo `DONE`, y `8` si se quedó en `BLOCKED`, agotó el presupuesto o se rindió.
+- **Modo «hasta que yo pare».** Con `--hasta-que-pare` desaparecen el tope de turnos y la ventana de
+  tiempo: el lazo sigue hasta que el modelo dice `DONE`, hasta que lo paras o hasta que salta uno de
+  los dos frenos. Detalle en [Modo hasta que yo pare](autonoma-agent/README.md#modo-hasta-que-yo-pare).
+- **Qué repo y qué chat.** Si no pasas `--repo`, el lazo pregunta dónde trabaja (carpeta actual,
+  tu `repos.json` o un escaneo de `AUTONOMA_REPOS`) y si abre un chat nuevo o sigue uno existente.
+  Detalle en [Arranque](autonoma-agent/README.md#arranque-en-qué-repositorio-y-con-qué-chat).
+- **Desde el celular.** `--panel` abre una página para ver cómo va, escribirle una instrucción o
+  pararlo; con `--panel 0.0.0.0` se ve desde el teléfono en tu wifi (con token, y avisando).
+  Detalle en [desde el celular](autonoma-agent/README.md#verlo-dirigirlo-y-pararlo-desde-el-celular).
 - **Interrumpirlo.** `Ctrl+C`, o `touch autonoma-agent/supervisor/STOP` desde otra terminal: el lazo se
   corta limpio y los trabajos en segundo plano mueren con él. Para corregir el rumbo sin pararlo, escribe
   en `supervisor/steer.txt`; se lee antes del siguiente turno y se borra.

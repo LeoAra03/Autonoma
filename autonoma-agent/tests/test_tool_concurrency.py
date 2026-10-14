@@ -7,6 +7,7 @@ nota cuando el proveedor rechaza el historial por `tool_call_id` desparejado.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -169,6 +170,16 @@ def test_a_local_tool_in_the_batch_forces_serial_execution(tmp_path: Path) -> No
 def test_parallelism_is_bounded_by_settings(tmp_path: Path) -> None:
     calls = [_tool_call("web_search", f"c{index}") for index in range(6)]
     agent, clock, _client = _agent(tmp_path, calls, max_parallel=2)
+    assert agent.run("investiga") == "listo"
+    assert clock.peak <= 2
+    assert len(clock.calls) == 6
+
+
+def test_parallelism_is_bounded_by_cpu_count(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Ocho hilos en dos núcleos no leen más rápido: sólo calientan el portátil."""
+    monkeypatch.setattr(os, "cpu_count", lambda: 2)
+    calls = [_tool_call("web_search", f"c{index}") for index in range(6)]
+    agent, clock, _client = _agent(tmp_path, calls, max_parallel=4)
     assert agent.run("investiga") == "listo"
     assert clock.peak <= 2
     assert len(clock.calls) == 6

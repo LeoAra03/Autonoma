@@ -524,7 +524,15 @@ class Agent:
             return [self._run_tool_call(call, prompt, emit) for call in calls]
         for call in calls:
             emit(EventKind.TOOL.value, f"{_tool_name(call)}(en paralelo)")
-        workers = min(len(calls), max(1, self.settings.max_parallel_tool_calls), _PARALLEL_CAP)
+        # El tope es el más bajo de tres: lo que pidió el modelo, lo que permite la
+        # configuración y lo que aguanta esta máquina. En un portátil de dos núcleos,
+        # ocho hilos leyendo disco a la vez no van más rápido: sólo calientan el equipo.
+        workers = min(
+            len(calls),
+            max(1, self.settings.max_parallel_tool_calls),
+            _PARALLEL_CAP,
+            max(1, os.cpu_count() or 1),
+        )
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="autonoma-tool") as pool:
             futures = [pool.submit(self._tool_outcome, call, prompt) for call in calls]
             outcomes = [future.result() for future in futures]
@@ -839,7 +847,7 @@ def build_approval_policy(settings: Settings) -> ApprovalPolicy | None:
         return None
     return load_approval_policy(
         path,
-        default_root=settings.root,
+        default_root=settings.workspace,
         max_bytes=settings.approval_policy_max_bytes,
         allow_shell_commands=settings.allow_shell_commands,
     )

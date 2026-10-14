@@ -1,0 +1,41 @@
+# Configuración del asistente web de arena.ai  ·  Etapa 1
+
+[arena]
+#: URL a la que se navega si no hay pestaña abierta.
+url = "https://arena.ai/agent"
+#: Fragmento para reconocer la pestaña correcta entre las que ya tengas abiertas.
+patron_url = "arena.ai"
+#: Repositorio que se selecciona (se usa en etapas posteriores).
+repositorio = "usuario/repo"
+
+[cdp]
+#: Puerto que abriste al arrancar Brave con --remote-debugging-port=9222
+url = "http://127.0.0.1:9222"
+conexion_ms = 10000
+#: NUNCA traer la ventana al frente: el usuario sigue usando su equipo.
+traer_al_frente = false
+
+[tiempos]
+#: Segundos sin cambios en el DOM para dar un turno por terminado (Etapa 2).
+quiet_seconds = 8
+#: Timeout duro por turno: si se pasa, se aborta el turno y se avisa.
+turno_segundos = 900
+#: Espera máxima a que aparezca un elemento.
+elemento_ms = 15000
+
+[ritmo]
+#: Mitigación de la cláusula 5(x): flooding. Va en el código, no en un comentario.
+#: Un humano no escribe un turno cada 2 segundos; esto tampoco.
+min_espera = 5
+max_espera = 15
+#: Cada N turnos, una pausa larga.
+pausa_cada = 8
+pausa_larga = 90
+
+[selectores]
+archivo = "selectors.toml"
+
+[logs]
+directorio = "logs"
+#: Cada línea: timestamp, prompt enviado, extracto, duración, estado.
+archivo = "turnos.jsonl"

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# arena-web/execute — asistente web para arena.ai sobre un Brave que ya corre.
+#
+# ETAPA 1 (ésta): diagnóstico. No envía ni un prompt.
+#
+#   ./execute --probe                abre la pestaña, recorre el DOM y te imprime
+#                                    qué selector resolvió, cuál falló y qué
+#                                    candidatos hay. Corriges selectors.toml y listo.
+#   ./execute --probe --json         lo mismo, en JSON.
+#   ./execute --config ../otro.toml  con otra configuración.
+#
+# Antes, una sola vez, arranca Brave así (déjalo vivo):
+#
+#   brave-browser --remote-debugging-port=9222 \
+#     --remote-allow-origins='*' --user-data-dir="$HOME/.brave-autonoma" \
+#     --disable-background-timer-throttling --disable-renderer-backgrounding \
+#     --disable-backgrounding-occluded-windows \
+#     --disable-features=CalculateNativeWinOcclusion https://arena.ai/agent
+#
+# Y en esa ventana inicia sesión y conecta GitHub. Esa es la pestaña del bot:
+# puedes taparla con una película, el bot trabaja por CDP sin tocar tu ratón.
+
+set -euo pipefail
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+uso() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+
+if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  uso
+  exit 0
+fi
+
+py=""
+for candidato in "${AUTONOMA_PYTHON:-}" python3 python; do
+  [[ -n "$candidato" ]] || continue
+  if command -v "$candidato" >/dev/null 2>&1; then
+    py="$candidato"
+    break
+  fi
+done
+if [[ -z "$py" ]]; then
+  echo "execute: necesito Python 3.10+ (https://www.python.org/downloads/)." >&2
+  exit 127
+fi
+
+if [[ "${AUTONOMA_ECHO:-0}" == "1" ]]; then
+  printf '%q ' "$py" "$HERE/probe.py" "$@"
+  echo
+  exit 0
+fi
+
+exec "$py" "$HERE/probe.py" "$@"

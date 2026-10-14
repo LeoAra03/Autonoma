@@ -13,11 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from autonoma.errors import CancelledByUserError, ConfigurationError, ExitCode, ToolContractError
+from autonoma.errors import AutonomaError, CancelledByUserError, ConfigurationError, ExitCode, ToolContractError
 from autonoma.supervisor import (
     STOP_FILENAME,
     TURNS_FILENAME,
     SupervisorBudget,
+    SupervisorState,
+    _Lazo,
     goal_from_file,
     parse_continuation,
     run_supervisor,
@@ -186,6 +188,19 @@ def test_un_panic_dentro_del_turno_se_traduce_a_cancelado() -> None:
     assert outcome.state == "cancelled"
 
 
+def test_el_lazo_mide_la_ventana_con_el_reloj_inyectado() -> None:
+    """La ventana se mide con el reloj inyectado, no con el del sistema.
+
+    Midiendo con `time.monotonic()` (el uptime de la máquina) el resultado cambiaba
+    según cuánto llevara encendida: en un runner recién creado, con menos de un minuto
+    de uptime, el lazo seguía en vez de agotarse y el test pasaba a `failed`.
+    """
+    clock = FakeClock(step=120.0)
+    lazo = _Lazo(budget=SupervisorBudget(max_minutes=1.0), goal="objetivo", started=clock(), turns=[], clock=clock)
+    assert lazo.elapsed() == 120.0
+    assert not lazo.time_left()
+
+
 def test_la_ventana_de_tiempo_corta_el_lazo() -> None:
     turn = Scripted("NEXT: uno", "NEXT: dos")
     outcome = run_supervisor(
@@ -292,3 +307,134 @@ def test_el_lazo_puede_no_devolver_nada_y_aun_asi_cortar() -> None:
     outcome = run_supervisor("objetivo", turn, budget=SupervisorBudget(max_turns=2, max_unparsable=0))
     assert outcome.state == "failed"
     assert len(outcome.report.turns) == 1
+
+
+# ─────────────────────────────────────────────── modo "hasta que yo pare"
+def test_hasta_que_pare_no_se_corta_por_el_tope_de_turnos() -> None:
+    """Con el tope quitado, el lazo sigue tantos turnos como haga falta hasta DONE."""
+    turn = Scripted(*(f"NEXT: paso {i}" for i in range(1, 6)), "DONE: los cinco pasos")
+    outcome = run_supervisor("objetivo", turn, budget=SupervisorBudget(max_turns=1, hasta_que_pare=True))
+    assert outcome.state == "done"
+    assert len(turn.prompts) == 6
+
+
+def test_hasta_que_pare_ignora_la_ventana_de_tiempo() -> None:
+    """El reloj puede pasar de la ventana: en este modo la ventana deja de existir."""
+    turn = Scripted("NEXT: paso uno", "DONE: listo")
+    outcome = run_supervisor(
+        "objetivo",
+        turn,
+        budget=SupervisorBudget(max_turns=1, max_minutes=1.0, hasta_que_pare=True),
+        clock=FakeClock(step=120.0),
+    )
+    assert outcome.state == "done"
+    assert len(turn.prompts) == 2
+
+
+def test_hasta_que_pare_se_rinde_tras_los_fallos_seguidos() -> None:
+    """El freno: sin él, un proveedor caído dejaría el lazo girando indefinidamente."""
+    llamadas: list[int] = []
+
+    def roto(_prompt: str) -> str:
+        llamadas.append(1)
+        raise AutonomaError("proveedor caído")
+
+    outcome = run_supervisor(
+        "objetivo", roto, budget=SupervisorBudget(hasta_que_pare=True, max_fallos_seguidos=3)
+    )
+    assert outcome.state == "failed"
+    assert len(llamadas) == 4  # tolera 3 y se rinde en el cuarto
+    assert "fallos seguidos" in outcome.summary
+
+
+def test_el_freno_de_fallos_se_reinicia_cuando_un_turno_sale_bien() -> None:
+    """Un fallo aislado no debe cortar una corrida larga: lo que cuenta es la racha."""
+    llamadas: list[int] = []
+
+    def intermitente(_prompt: str) -> str:
+        llamadas.append(1)
+        if len(llamadas) <= 2:
+            raise AutonomaError("fallo de red")
+        return "NEXT: avanza" if len(llamadas) == 3 else "DONE: listo"
+
+    outcome = run_supervisor(
+        "objetivo", intermitente, budget=SupervisorBudget(hasta_que_pare=True, max_fallos_seguidos=2)
+    )
+    assert outcome.state == "done"
+    assert len(llamadas) == 4
+
+
+def test_el_archivo_stop_corta_el_modo_hasta_que_pare(tmp_path: Path) -> None:
+    """La salida manual: tocar `supervisor/STOP` desde otra terminal para el lazo."""
+    directorio = tmp_path / "supervisor"
+    directorio.mkdir()
+
+    class ParaEnElSegundo:
+        """Devuelve `NEXT` siempre y crea el `STOP` al llegar al segundo turno."""
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if len(self.prompts) >= 2:
+                (directorio / STOP_FILENAME).write_text("para", encoding="utf-8")
+            return "NEXT: sigo"
+
+    turn = ParaEnElSegundo()
+    outcome = run_supervisor(
+        "objetivo", turn, budget=SupervisorBudget(hasta_que_pare=True), report_dir=directorio
+    )
+    assert outcome.state == "exhausted"
+    assert STOP_FILENAME in outcome.report.stopped_by
+    assert len(turn.prompts) == 2  # el STOP se lee al empezar el turno siguiente
+
+
+# ──────────────────────────────────────────────────────── reanudación (--continuar)
+def test_el_estado_se_guarda_con_la_continuacion_del_paso_siguiente(tmp_path: Path) -> None:
+    """`estado.json` se escribe al final de cada turno: reanudar no repite trabajo."""
+    outcome = run_supervisor(
+        "objetivo",
+        Scripted("NEXT: paso uno", "DONE: listo"),
+        budget=SupervisorBudget(max_turns=1),
+        report_dir=tmp_path,
+    )
+    assert outcome.state == "exhausted"
+    estado = SupervisorState.cargar(tmp_path)
+    assert estado is not None
+    assert estado.goal == "objetivo"
+    assert estado.turno == 1
+    assert estado.continuation == "paso uno"
+    assert estado.actualizado  # sello de tiempo, para saber de cuándo es
+
+
+def test_continuar_arranca_en_el_turno_siguiente_y_con_el_paso_pendiente(tmp_path: Path) -> None:
+    """`--continuar`: el turno se numera siguiendo la corrida anterior y recupera el paso."""
+    run_supervisor(
+        "objetivo",
+        Scripted("NEXT: paso uno", "DONE: listo"),
+        budget=SupervisorBudget(max_turns=1),
+        report_dir=tmp_path,
+    )
+    anterior = SupervisorState.cargar(tmp_path)
+    assert anterior is not None
+    turn = Scripted("DONE: listo")
+    outcome = run_supervisor(
+        "objetivo",
+        turn,
+        budget=SupervisorBudget(max_turns=1),
+        report_dir=tmp_path,
+        continuation=anterior.continuation,
+        turn_offset=anterior.turno,
+    )
+    assert outcome.state == "done"
+    assert outcome.report.turns[0].index == 2  # sigue la numeración, no vuelve a 1
+    assert "paso uno" in turn.prompts[0]
+
+
+def test_cargar_estado_sin_corrida_previa_devuelve_none(tmp_path: Path) -> None:
+    assert SupervisorState.cargar(tmp_path) is None
+    (tmp_path / "estado.json").write_text("{ esto no es json", encoding="utf-8")
+    assert SupervisorState.cargar(tmp_path) is None
+    (tmp_path / "estado.json").write_text('{"goal": "   "}', encoding="utf-8")
+    assert SupervisorState.cargar(tmp_path) is None  # objetivo vacío = corrida inservible

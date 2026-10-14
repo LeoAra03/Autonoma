@@ -9,11 +9,15 @@ Cambios de esta versión:
   eventos), no en clausuras anidadas dentro del turno.
 - Logs JSON estructurados con `trace_id`, métricas en `/status` y `--selftest`
   para validar el ejecutable empaquetado.
+- Arranque liviano: `httpx`, `bs4` y `rich` se cargan dentro de la función que los
+  usa, no al importar el módulo (`--version` y `--help` no pagan esas ~130 ms ni
+  esos ~14 MiB). El lazo respira con `--pausa` y dice su pico de memoria al parar.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -28,20 +32,48 @@ from typing import Any, Final
 from autonoma import __app_name__, __version__
 from autonoma.agent import Agent, build_agent, build_approval_policy
 from autonoma.approval import ApprovalPolicy, load_approval_policy, write_policy_template
-from autonoma.config import Settings, load_settings, save_api_keys
+from autonoma.config import (
+    Settings,
+    clear_ndus,
+    load_json_config,
+    load_settings,
+    read_dotenv_file,
+    save_api_keys,
+    save_ndus,
+)
 from autonoma.diagnostics import run_diagnostics, run_selftest
 from autonoma.errors import AutonomaError, CancelledByUserError, ExitCode
 from autonoma.key_handler import KeyHandler, ListenerStatus, PanicController, PanicError
-from autonoma.observability import MetricsRegistry, configure_logging, current_trace_id, log_event
+from autonoma.ndus import COPY_HINTS, import_ndus, mask, probe_sources
+from autonoma.observability import (
+    MetricsRegistry,
+    configure_logging,
+    current_trace_id,
+    log_event,
+    pico_memoria_mib,
+)
+from autonoma.panel import DEFAULT_PORT, iniciar_panel
+from autonoma.panel import Panel as PanelWeb
 from autonoma.ports import ConsolePort, EventKind
 from autonoma.presentation import approval_heading, operation_preview, safe_text
 from autonoma.runtime import RenderPreferences, RuntimeContext
-from autonoma.sessions import SessionStore
+from autonoma.sessions import SessionInfo, SessionStore
+from autonoma.starter import (
+    ARRANQUE_ENVVAR,
+    REGISTRY_FILENAME,
+    Arranque,
+    aplicar_arranque,
+    bases_del_entorno,
+    resolver_arranque,
+)
 from autonoma.supervisor import (
+    STEER_FILENAME,
+    STOP_FILENAME,
     TURNS_FILENAME,
     SupervisorBudget,
     SupervisorOutcome,
     SupervisorReport,
+    cargar_estado,
     goal_from_file,
     parse_continuation,
     run_supervisor,
@@ -50,18 +82,22 @@ from autonoma.supervisor import (
 
 __all__ = ["HELP_TEXT", "Session", "build_console", "main", "parse_args", "repl"]
 
-try:  # la dependencia es opcional por diseño: sin Rich se usa texto plano
-    from rich.console import Console
-    from rich.live import Live
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    from rich.text import Text
-    from rich.theme import Theme
 
-    _RICH_IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:  # pragma: no cover - depende del entorno
-    Console = Live = Markdown = Panel = Text = Theme = object  # type: ignore[assignment,misc]
-    _RICH_IMPORT_ERROR = exc
+def _rich_instalado() -> ImportError | None:
+    """`None` si Rich está disponible; el error si no.
+
+    Se pregunta con `find_spec` en vez de importando: cargar Rich (y con él
+    markdown-it-py) cuesta ~50 ms y ~4 MiB, y hay comandos que no dibujan nada
+    (`--version`, `--help`, `--doctor`, el lazo en segundo plano). El import real
+    ocurre sólo donde se va a pintar.
+    """
+    try:
+        return None if importlib.util.find_spec("rich") is not None else ImportError("rich no está instalado")
+    except (ImportError, ValueError):  # pragma: no cover - entornos sin rich instalable
+        return ImportError("rich no está instalado")
+
+
+_RICH_IMPORT_ERROR: ImportError | None = _rich_instalado()
 
 # Sonda de importación: se resuelve una vez al importar el módulo y no vuelve a cambiar.
 RICH_AVAILABLE: Final[bool] = _RICH_IMPORT_ERROR is None
@@ -78,6 +114,10 @@ Comandos
   /quit  /exit       salir
   /key               pegar NOTRACK_API_KEY (no se muestra)
   /brave             pegar BRAVE_API_KEY (opcional)
+  /ndus [valor]      importar la cookie NDUS: valor suelto, `ndus=...` o cabecera Cookie
+  /ndus auto         buscarla en los navegadores de esta máquina y guardarla
+  /ndus archivo RUTA leerla de un cookies.txt exportado (o de la cabecera pegada)
+  /ndus ver          ver el valor enmascarado   ·   /ndus borrar  quitarla del txt personal
   /status            claves, knowledge_base, pánico y métricas
   /kb                listar notas de knowledge_base
   /clear             borrar historial de conversación
@@ -88,6 +128,19 @@ Comandos
   /next [objetivo]   un turno más del lazo con el paso que quedó pendiente
   /policy [ruta]     ver la política de aprobación delegada, o recargar otra
   /panic             activar cancelación entre tareas
+
+Lazo (--supervise)
+  --hasta-que-pare  sin tope de turnos ni de tiempo: sigue hasta DONE, STOP o Ctrl+C
+  --continuar       retoma la corrida anterior donde se cortó (supervisor/estado.json)
+  Pararlo desde otra terminal: crea el archivo supervisor/STOP
+  Darle una instrucción sin pararlo: escribe supervisor/steer.txt
+
+Arranque (qué repo y qué chat)
+  --repo RUTA       repositorio sobre el que trabajar (sin preguntar)
+  --repos-dir RUTA  carpeta madre que escanear buscando repos (repetible; o AUTONOMA_REPOS)
+  --elegir          preguntar repositorio y chat aunque no haya terminal interactiva
+  Sin --repo, el lazo pregunta: ¿sobre qué repositorio trabajo? ¿chat nuevo o uno existente?
+  Las carpetas que escribas a mano y pidas recordar quedan en repos.json (raíz de datos).
 
 Pánico
   P global es opcional: inicia con --global-hotkey si lo necesitas.
@@ -121,6 +174,9 @@ class RichConsoleFactory:
         self._render = render
 
     def build(self) -> ConsolePort:
+        from rich.console import Console
+        from rich.theme import Theme
+
         theme = Theme({"ok": "green", "warn": "yellow", "err": "bold red", "muted": "dim", "accent": "cyan"})
         return Console(
             theme=theme,
@@ -162,6 +218,8 @@ def banner_body(settings: Settings, status: ListenerStatus) -> str:
 def print_banner(console: ConsolePort, context: RuntimeContext, settings: Settings, status: ListenerStatus) -> None:
     body = banner_body(settings, status)
     if context.use_rich and RICH_AVAILABLE:
+        from rich.panel import Panel
+
         console.print(Panel(body, title=__app_name__, border_style="cyan"))
         return
     console.print("=" * 60)
@@ -197,6 +255,9 @@ class _ProgressReporter:
             thread.join(timeout=1.0)
 
     def _spin(self) -> None:
+        from rich.live import Live
+        from rich.text import Text
+
         index = 0
         try:
             # `Live` exige una `rich.console.Console` real: el spinner sólo corre en modo rich.
@@ -504,7 +565,7 @@ class Session:
     # ------------------------------------------------------------------ estado
     def status(self) -> None:
         personal = self.settings.personal_file or "credenciales.txt (no encontrado)"
-        ndus_line = "sí" if self.settings.has_ndus else "no (opcional)"
+        ndus_line = mask(self.settings.ndus) if self.settings.has_ndus else "no (opcional)"
         # Indicar de dónde vino la clave
         if self.settings.has_notrack_key:
             if self.settings.personal_status.value == "ok" and self.settings.personal_file:
@@ -597,8 +658,28 @@ class Session:
             max_turns=settings.supervisor_max_turns,
             max_minutes=settings.supervisor_max_minutes,
             idle_seconds=settings.supervisor_idle_seconds,
+            hasta_que_pare=settings.supervisor_hasta_que_pare,
+            max_fallos_seguidos=settings.supervisor_tope_fallos,
         )
         directory = settings.supervisor_path()
+        #: Reanudación: `estado.json` guarda el objetivo, el turno y el paso pendiente.
+        continuation = ""
+        turn_offset = 0
+        if settings.supervisor_continuar:
+            previo = cargar_estado(directory)
+            if previo is None:
+                self.console.print(
+                    "no hay una corrida anterior que continuar: se empieza de cero", style="warn"
+                )
+            else:
+                goal = goal or previo.goal
+                continuation = previo.continuation
+                turn_offset = max(0, previo.turno)
+                self.console.print(
+                    f"continuando la corrida anterior desde el turno {turn_offset + 1}"
+                    + (f" · paso pendiente: {previo.continuation[:120]}" if previo.continuation else ""),
+                    style="muted",
+                )
         self._last_goal = goal
         if not self.agent.notrack.configured:
             # Sin modelo no hay lazo posible: se dice una vez, no se gasta el presupuesto en
@@ -618,11 +699,27 @@ class Session:
             )
             informe.save(directory)
             return SupervisorOutcome(state="blocked", summary=reason, report=informe)
-        self.console.print(
-            f"lazo supervisor: {effective.max_turns} turnos · {effective.max_minutes:g} min · "
-            f"informe en {directory / TURNS_FILENAME}",
-            style="muted",
-        )
+        if effective.hasta_que_pare:
+            self.console.print(
+                "lazo supervisor · MODO HASTA QUE YO PARE: sin tope de turnos ni de tiempo "
+                f"(se rinde tras {effective.max_fallos_seguidos} fallos seguidos)",
+                style="muted",
+            )
+            self.console.print(
+                f"para pararlo: Ctrl+C aquí, o crea el archivo {directory / STOP_FILENAME} desde otra "
+                f"terminal; para darle una orden sin pararlo, escribe {directory / STEER_FILENAME}",
+                style="muted",
+            )
+            self.console.print(
+                f"registro continuo: {directory / TURNS_FILENAME} · reanudable con --continuar",
+                style="muted",
+            )
+        else:
+            self.console.print(
+                f"lazo supervisor: {effective.max_turns} turnos · {effective.max_minutes:g} min · "
+                f"informe en {directory / TURNS_FILENAME}",
+                style="muted",
+            )
         if self.approval_policy is not None and self.approval_policy.enabled:
             self.console.print(
                 f"política delegada activa ({len(self.approval_policy.allow)} reglas, "
@@ -659,6 +756,8 @@ class Session:
             on_event=lambda kind, message: self.console.print(f"  [{kind}] {safe_text(message)}", style="muted"),
             is_cancelled=lambda: self.panic.is_set,
             stop_on_block=settings.supervisor_stop_on_block,
+            continuation=continuation,
+            turn_offset=turn_offset,
         )
 
     def report_supervised(self, outcome: SupervisorOutcome) -> None:
@@ -671,13 +770,20 @@ class Session:
             "failed": ("el lazo se rindió", "err"),
         }
         label, style = labels.get(outcome.state, ("el lazo terminó", "warn"))
-        self.console.print(f"\nlazo: {label} · {len(outcome.report.turns)} turnos", style=style)
+        if STOP_FILENAME in outcome.report.stopped_by:
+            label, style = "detenido por el archivo STOP", "ok"
+        pico = pico_memoria_mib()
+        memoria = f" · pico {pico} MiB" if pico is not None else ""
+        self.console.print(f"\nlazo: {label} · {len(outcome.report.turns)} turnos{memoria}", style=style)
         if outcome.summary:
             self._render_answer(outcome.summary)
 
     def _render_answer(self, answer: str) -> None:
         self.console.print()
         if self.render.use_rich and RICH_AVAILABLE:
+            from rich.markdown import Markdown
+            from rich.panel import Panel
+
             self.console.print(Panel(Markdown(safe_text(answer or "")), title=__app_name__, border_style="green"))
             return
         self.console.print(safe_text(answer))
@@ -767,7 +873,7 @@ class Session:
             try:
                 loaded = load_approval_policy(
                     candidate,
-                    default_root=self.settings.root,
+                    default_root=self.settings.workspace,
                     max_bytes=self.settings.approval_policy_max_bytes,
                 )
             except (AutonomaError, ValueError, OSError) as exc:
@@ -833,6 +939,101 @@ class Session:
         self.console.print("BRAVE_API_KEY actualizada.", style="ok")
         return True
 
+    # ------------------------------------------------------------------- NDUS
+    def _cmd_ndus(self, rest: str = "") -> bool:
+        """`/ndus`: pegar, autodetectar, importar de archivo, ver o borrar la cookie."""
+        raw = (rest or "").strip()
+        if not raw:
+            return self._ndus_interactive()
+        first, _, tail = raw.partition(" ")
+        subcommand = first.lower()
+        if subcommand == "auto":
+            return self._ndus_apply(import_ndus(auto=True), "navegadores de esta máquina")
+        if subcommand in {"archivo", "file"}:
+            path = Path(tail.strip()).expanduser()
+            if not tail.strip():
+                self.console.print("falta la ruta: /ndus archivo cookies.txt", style="err")
+                return True
+            if not path.is_file():
+                self.console.print(f"no existe el archivo: {path}", style="err")
+                return True
+            return self._ndus_apply(import_ndus(file=path), f"archivo {path.name}")
+        if subcommand in {"ver", "show"}:
+            self._ndus_show()
+            return True
+        if subcommand in {"borrar", "clear"}:
+            return self._ndus_clear()
+        return self._ndus_apply(import_ndus(text=raw), "texto pegado")
+
+    def _ndus_interactive(self) -> bool:
+        """Sin argumentos: muestra el estado y, si hay TTY, deja pegar sin eco."""
+        self._ndus_show()
+        self.console.print(COPY_HINTS)
+        if not sys.stdin.isatty():
+            self.console.print(
+                "Aquí no hay terminal interactiva: pásala como argumento (/ndus <valor>) "
+                "o con la variable NDUS=valor.",
+                style="muted",
+            )
+            return True
+        value = _read_secret("NDUS (no se muestra): ")
+        if not value:
+            self.console.print("NDUS sin cambios.", style="muted")
+            return True
+        return self._ndus_apply(import_ndus(text=value), "texto pegado")
+
+    def _ndus_show(self) -> None:
+        """Estado de la cookie sin revelarla: enmascarada y con su origen."""
+        if self.settings.has_ndus:
+            self.console.print(f"NDUS: {mask(self.settings.ndus)}", style="ok")
+            return
+        self.console.print("NDUS: no configurada (opcional)", style="muted")
+
+    def _ndus_apply(self, result: Any, origin: str) -> bool:
+        """Guarda lo importado y lo deja vigente en la sesión sin recargar de disco."""
+        if not result.ok:
+            self.console.print(f"No se encontró NDUS en {origin}: {result.detail}", style="warn")
+            self.console.print(COPY_HINTS)
+            for probe in probe_sources()[:6]:
+                self.console.print(probe.describe())
+            return True
+        try:
+            path = save_ndus(result.value, personal_path=self._personal_path_or_none(), root=self.context.root)
+        except (AutonomaError, OSError) as exc:
+            detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+            self.console.print(f"No se pudo guardar la NDUS: {safe_text(detail)}", style="err")
+            return True
+        self._overrides["NDUS"] = result.value
+        self.settings = self.settings.with_ndus(result.value)
+        self.console.print(
+            f"NDUS guardada en {path.name} · {mask(result.value)} · origen: {result.origin}",
+            style="ok",
+        )
+        return True
+
+    def _ndus_clear(self) -> bool:
+        """Borra la cookie del txt personal y avisa si además vive en `.env` (prioridad)."""
+        try:
+            path = clear_ndus(personal_path=self._personal_path_or_none(), root=self.context.root)
+        except (AutonomaError, OSError) as exc:
+            detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+            self.console.print(f"No se pudo borrar la NDUS: {safe_text(detail)}", style="err")
+            return True
+        self._overrides["NDUS"] = ""
+        self.settings = self.settings.with_ndus("")
+        self.console.print(f"NDUS eliminada de {path.name}.", style="ok")
+        if "NDUS" in self.settings.declared_keys:
+            self.console.print(
+                "Aviso: `.env` también define NDUS y tiene prioridad; bórrala allí para que surta efecto.",
+                style="warn",
+            )
+        return True
+
+    def _personal_path_or_none(self) -> Path | None:
+        """El txt personal detectado, o `None` para que `save_ndus` elija dónde crearlo."""
+        raw = (self.settings.personal_file or "").strip()
+        return Path(raw) if raw else None
+
     # -------------------------------------------------------------- ciclo final
     def close(self) -> None:
         """Cierra listener, recursos del agente y handlers de log, en ese orden."""
@@ -863,6 +1064,7 @@ _COMMAND_TABLE: Final[Mapping[str, CommandHandler]] = {
     "/kb": Session._cmd_kb,
     "/key": Session._cmd_key,
     "/brave": Session._cmd_brave,
+    "/ndus": Session._cmd_ndus,
 }
 
 
@@ -980,6 +1182,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="objetivo leído de un archivo (líneas que empiezan por # se ignoran)",
     )
     parser.add_argument(
+        "--repo",
+        metavar="RUTA",
+        help="repositorio (carpeta) sobre el que trabajar; sin esto, el lazo lo pregunta",
+    )
+    parser.add_argument(
+        "--repos-dir",
+        action="append",
+        metavar="RUTA",
+        help=f"carpeta madre con repos que escanear (repetible; o {ARRANQUE_ENVVAR})",
+    )
+    parser.add_argument(
+        "--elegir",
+        action="store_true",
+        help="preguntar repositorio y chat aunque no haya terminal interactiva",
+    )
+    parser.add_argument(
+        "--panel",
+        nargs="?",
+        const="127.0.0.1",
+        metavar="DIRECCIÓN",
+        help=f"panel para ver, dirigir y parar el lazo desde el navegador ({DEFAULT_PORT}); "
+        "con --panel 0.0.0.0 lo ve el celular en tu wifi",
+    )
+    parser.add_argument(
+        "--panel-port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="N",
+        help=f"puerto del panel (por defecto {DEFAULT_PORT})",
+    )
+    parser.add_argument(
         "--approval-policy",
         metavar="RUTA",
         help="JSON con el alcance que el usuario delega en modo desatendido (allow-list por herramienta)",
@@ -997,6 +1230,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-shell-commands",
         action="store_true",
         help="permitir que la política delegue `command` (texto interpretado por el shell), no sólo argv",
+    )
+    parser.add_argument(
+        "--hasta-que-pare",
+        action="store_true",
+        help="lazo sin tope de turnos ni de tiempo: sigue hasta DONE, `supervisor/STOP`, Ctrl+C o el freno de fallos",
+    )
+    parser.add_argument(
+        "--tope-fallos",
+        type=int,
+        default=None,
+        metavar="N",
+        help="con --hasta-que-pare, cuántos fallos seguidos se toleran antes de rendirse (1-1000)",
+    )
+    parser.add_argument(
+        "--pausa",
+        type=float,
+        default=None,
+        metavar="SEGUNDOS",
+        help="respiro entre turnos del lazo (0-3600; --supervise). Con --hasta-que-pare el valor por "
+        f"defecto es {PAUSA_LARGA_POR_DEFECTO:g} s; `--pausa 0` lo quita",
+    )
+    parser.add_argument(
+        "--continuar",
+        action="store_true",
+        help="retomar la corrida anterior del lazo donde se cortó (lee supervisor/estado.json)",
     )
     parser.add_argument(
         "--keep-going-on-block",
@@ -1023,6 +1281,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-persist", action="store_true", help="no escribir sesiones en disco en esta corrida")
     parser.add_argument(
+        "--ndus",
+        metavar="TEXTO",
+        help="importar la cookie NDUS: el valor suelto, `ndus=valor` o la cabecera Cookie completa",
+    )
+    parser.add_argument(
+        "--ndus-file",
+        metavar="RUTA",
+        help="leer la cookie NDUS de un archivo: `cookies.txt` exportado, cabecera Cookie o valor suelto",
+    )
+    parser.add_argument(
+        "--ndus-auto",
+        action="store_true",
+        help="buscar la cookie NDUS en los navegadores de esta máquina y guardarla si aparece",
+    )
+    parser.add_argument(
         "--max-steps", type=int, default=None, metavar="N", help="tope de iteraciones herramienta-modelo (1-200)"
     )
     parser.add_argument("prompt", nargs="*", help="instrucción única (sin REPL)")
@@ -1045,6 +1318,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             for flag, value in (
                 ("--turns", args.turns),
                 ("--minutes", args.minutes),
+                ("--pausa", args.pausa),
                 ("--goal-file", args.goal_file),
                 ("--keep-going-on-block", args.keep_going_on_block),
             )
@@ -1054,10 +1328,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"{' y '.join(extra)} requiere --supervise")
     if args.force and args.init_policy is None:
         parser.error("--force sólo acompaña a --init-policy")
+    ndus_flags = [
+        flag
+        for flag, value in (("--ndus", args.ndus), ("--ndus-file", args.ndus_file), ("--ndus-auto", args.ndus_auto))
+        if value
+    ]
+    if ndus_flags and (args.doctor or args.selftest or args.init_policy is not None):
+        parser.error(f"{' y '.join(ndus_flags)} no se mezcla con --doctor, --selftest ni --init-policy")
     if args.init_policy is not None and (args.doctor or args.selftest or args.supervise or args.prompt):
         parser.error("--init-policy no se mezcla con prompts, --doctor, --selftest ni --supervise")
-    if args.supervise and not (" ".join(args.prompt).strip() or (args.goal_file or "").strip()):
-        parser.error("--supervise necesita un objetivo: un prompt o --goal-file RUTA")
+    if args.hasta_que_pare and (args.turns is not None or args.minutes is not None):
+        parser.error("--hasta-que-pare no se mezcla con --turns ni --minutes: el lazo no tiene tope")
+    if args.tope_fallos is not None and not args.hasta_que_pare:
+        parser.error("--tope-fallos requiere --hasta-que-pare")
+    if args.pausa is not None and not 0 <= args.pausa <= 3600:
+        parser.error("--pausa debe estar entre 0 y 3600 segundos")
+    for flag, value in (("--hasta-que-pare", args.hasta_que_pare), ("--continuar", args.continuar)):
+        if value and not args.supervise:
+            parser.error(f"{flag} requiere --supervise")
+    if args.supervise and not (
+        " ".join(args.prompt).strip() or (args.goal_file or "").strip() or args.continuar
+    ):
+        parser.error("--supervise necesita un objetivo: un prompt, --goal-file RUTA o --continuar")
     return args
 
 
@@ -1074,6 +1366,27 @@ def build_context(args: argparse.Namespace) -> RuntimeContext:
 
 
 NO_PAUSE_ENV = "AUTONOMA_NO_PAUSE"
+
+#: Respiron por defecto del lazo sin tope (`--hasta-que-pare`): entre turnos el proceso
+#: sólo espera al proveedor, así que sin pausa encadena consultas durante horas con la CPU
+#: y la red clavadas. Dos segundos no se notan en una corrida larga y sí en el ventilador.
+#: Se apaga con `--pausa 0`, y cualquier valor propio (entorno, .env, config.json) manda.
+PAUSA_LARGA_POR_DEFECTO: Final[float] = 2.0
+_CLAVE_PAUSA: Final[str] = "SUPERVISOR_IDLE_SECONDS"
+
+
+def pausa_ya_configurada(data_root: Path) -> bool:
+    """¿La persona ya fijó la pausa entre turnos? Entonces no se le impone ninguna."""
+    if os.environ.get(_CLAVE_PAUSA):
+        return True
+    try:
+        if read_dotenv_file(data_root / ".env").values.get(_CLAVE_PAUSA):
+            return True
+        if _CLAVE_PAUSA.lower() in load_json_config(data_root / "config.json"):
+            return True
+    except OSError:  # sin ficheros de configuración no hay valor que respetar
+        return False
+    return False
 
 
 def should_pause_on_exit(
@@ -1133,6 +1446,73 @@ def _emit_policy_template(args: argparse.Namespace, context: RuntimeContext) -> 
     raise SystemExit(int(ExitCode.SUCCESS))
 
 
+def _import_ndus_from_args(args: argparse.Namespace, context: RuntimeContext) -> bool:
+    """Importa la cookie NDUS desde los flags; `False` si no se pudo (es opcional).
+
+    El valor nunca se imprime: sólo su máscara. Tras guardarla, la sesión en curso
+    la recibe como override para no tener que releer el disco.
+    """
+    try:
+        result = import_ndus(
+            text=args.ndus or None,
+            file=Path(args.ndus_file).expanduser() if args.ndus_file else None,
+            auto=bool(args.ndus_auto),
+        )
+    except OSError as exc:
+        print(f"No se pudo leer la cookie NDUS: {safe_text(str(exc))}", file=sys.stderr)
+        return False
+    if not result.ok:
+        print(f"NDUS no encontrada: {result.detail}", file=sys.stderr)
+        for probe in probe_sources()[:8]:
+            print(probe.describe(), file=sys.stderr)
+        print(COPY_HINTS, file=sys.stderr)
+        return False
+    try:
+        path = save_ndus(result.value, root=context.root)
+    except (AutonomaError, OSError) as exc:
+        detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
+        print(f"No se pudo guardar la NDUS: {safe_text(detail)}", file=sys.stderr)
+        return False
+    print(f"NDUS importada desde {result.origin} · {mask(result.value)} → {path}")
+    return True
+
+
+def _supervisor_dir(context: RuntimeContext) -> Path:
+    """Dónde vive `supervisor/` en esta ejecución (respeta `SUPERVISOR_DIR`)."""
+    raw = os.environ.get("SUPERVISOR_DIR", "").strip()
+    candidate = Path(raw).expanduser() if raw else context.root / "supervisor"
+    return candidate if candidate.is_absolute() else (context.root / candidate).resolve()
+
+
+def _abrir_panel(
+    args: argparse.Namespace,
+    context: RuntimeContext,
+    consola: ConsolePort,
+    *,
+    overrides: Mapping[str, str] | None = None,
+) -> PanelWeb:
+    """Abre el panel y dice por dónde entrar. Si escucha fuera del equipo, lo advierte."""
+    direccion = args.panel or "127.0.0.1"
+    ajustes = load_settings(overrides=overrides, data_root=context.data_root, ensure_dirs=False)
+    panel = iniciar_panel(
+        _supervisor_dir(context),
+        direccion=direccion,
+        puerto=int(args.panel_port),
+        secretos=tuple(ajustes.secret_values),
+    )
+    urls = panel.urls()
+    consola.print(f"panel: {urls[0]}" if urls else "panel: escuchando (sin URL que mostrar)")
+    for url in urls[1:]:
+        consola.print(f"       {url}")
+    if direccion not in {"127.0.0.1", "localhost", "::1"}:
+        consola.print(
+            "escuchando fuera de este equipo: cualquiera en la red puede intentar entrar "
+            "(hace falta el token, y Windows puede pedirte permiso de firewall)",
+            style="warn",
+        )
+    return panel
+
+
 def main(argv: list[str] | None = None) -> None:
     """Punto de entrada del paquete y del ejecutable congelado."""
     args = parse_args(argv)
@@ -1144,6 +1524,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.init_policy is not None:
         return _emit_policy_template(args, context)
     prompt = " ".join(args.prompt).strip() or None
+    if args.ndus or args.ndus_file or args.ndus_auto:
+        imported = _import_ndus_from_args(args, context)
+        # Sin prompt ni terminal interactiva no hay nada más que hacer: se importa y sale.
+        if not prompt and not sys.stdin.isatty():
+            maybe_pause_on_exit(args)
+            raise SystemExit(int(ExitCode.SUCCESS) if imported else int(ExitCode.CONFIGURATION))
     overrides: dict[str, str] = {}
     if args.no_persist:
         overrides["SESSION_PERSIST"] = "false"
@@ -1159,23 +1545,79 @@ def main(argv: list[str] | None = None) -> None:
         overrides["SUPERVISOR_MAX_MINUTES"] = str(args.minutes)
     if args.keep_going_on_block:
         overrides["SUPERVISOR_STOP_ON_BLOCK"] = "false"
+    if args.hasta_que_pare:
+        overrides["SUPERVISOR_HASTA_QUE_PARE"] = "true"
+    if args.continuar:
+        overrides["SUPERVISOR_CONTINUAR"] = "true"
+    if args.tope_fallos is not None:
+        overrides["SUPERVISOR_TOPE_FALLOS"] = str(args.tope_fallos)
+    if args.pausa is not None:
+        overrides[_CLAVE_PAUSA] = str(args.pausa)
+    elif args.hasta_que_pare and not pausa_ya_configurada(context.data_root.path):
+        overrides[_CLAVE_PAUSA] = str(PAUSA_LARGA_POR_DEFECTO)
     if args.goal_file:
         overrides["SUPERVISOR_GOAL_FILE"] = str(args.goal_file)
+
+    # Arranque asistido: en qué repositorio y con qué chat, antes de irse a segundo plano.
+    # Sólo pregunta si va a trabajar solo (`--supervise`): para un prompt suelto sería ruido.
+    resume = args.resume
+    consola = build_console(context)
+    elegido: Path | None = Path(args.repo).expanduser() if args.repo else None
+    if elegido is None and args.supervise and (sys.stdin.isatty() or args.elegir):
+        _configure_stdio()
+        previos = load_settings(overrides=overrides, data_root=context.data_root, ensure_dirs=False)
+        chats: tuple[SessionInfo, ...] = ()
+        if previos.session_persist:
+            chats = SessionStore(previos.sessions_path()).list()
+        arranque = resolver_arranque(
+            consola,
+            registro=context.root / REGISTRY_FILENAME,
+            bases=bases_del_entorno(extra=[Path(item).expanduser() for item in args.repos_dir or ()]),
+            chats=chats,
+            interactivo=True,
+        )
+        elegido = arranque.repo
+        if arranque.chat and resume is None:
+            resume = arranque.chat
+    if elegido is not None:
+        destino = elegido.expanduser().resolve()
+        if not destino.is_dir():
+            print(f"No existe la carpeta '{destino}'.", file=sys.stderr)
+            raise SystemExit(int(ExitCode.CONFIGURATION))
+        # Desde aquí, las rutas relativas del agente y las raíces de la política son el repo.
+        aplicar_arranque(Arranque(repo=destino, chat=resume, preguntado=True), overrides, consola)
+
     supervise_goal: str | None = None
     if args.supervise:
         try:
-            supervise_goal = prompt or goal_from_file(Path(args.goal_file).expanduser())
+            if prompt or (args.goal_file or "").strip():
+                supervise_goal = prompt or goal_from_file(Path(args.goal_file).expanduser())
+            else:
+                # `--continuar` sin objetivo: el objetivo es el de la corrida anterior.
+                previo = cargar_estado(_supervisor_dir(context))
+                if previo is None:
+                    print(
+                        "No hay una corrida anterior que continuar: falta "
+                        f"{_supervisor_dir(context) / 'estado.json'}. "
+                        "Da un objetivo o usa --goal-file RUTA.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(int(ExitCode.CONFIGURATION))
+                supervise_goal = previo.goal
         except (AutonomaError, OSError, ValueError) as exc:
             detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
             print(f"No se pudo leer el objetivo: {safe_text(detail)}", file=sys.stderr)
             raise SystemExit(int(ExitCode.CONFIGURATION)) from exc
+    panel: PanelWeb | None = None
+    if args.panel:
+        panel = _abrir_panel(args, context, consola, overrides=overrides)
     try:
         code = repl(
             once=prompt,
             allow_commands=bool(args.allow_commands),
             global_hotkey=bool(args.global_hotkey),
             context=context,
-            resume=args.resume,
+            resume=resume,
             attach=tuple(args.attach),
             overrides=overrides,
             supervise=supervise_goal,
@@ -1184,6 +1626,10 @@ def main(argv: list[str] | None = None) -> None:
         detail = exc.user_message() if isinstance(exc, AutonomaError) else str(exc)
         print(f"No se pudo iniciar Autonoma: {safe_text(detail)}", file=sys.stderr)
         code = int(exc.exit_code) if isinstance(exc, AutonomaError) else int(ExitCode.CONFIGURATION)
+    finally:
+        # El panel vive en su propio hilo: si el lazo termina, nadie debe quedarse escuchando.
+        if panel is not None:
+            panel.stop()
     maybe_pause_on_exit(args)
     raise SystemExit(code)
 

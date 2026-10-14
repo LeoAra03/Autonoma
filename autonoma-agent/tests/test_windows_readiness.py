@@ -1,7 +1,9 @@
+import importlib
 import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -90,6 +92,12 @@ def offline_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(diagnostics, "load_settings", lambda: settings)
     monkeypatch.setattr(diagnostics, "project_root", lambda: tmp_path)
     monkeypatch.setattr(diagnostics, "is_elevated", lambda: False)
+    # Dependencias: el arranque ya no las importa todas, así que el doctor no las
+    # encuentra en `sys.modules` por casualidad. Se declaran presentes de forma
+    # explícita (es lo que ocurría antes por efecto secundario) y lo que sí se simula
+    # es lo de siempre: que nada más se pueda sondear ni importar durante el chequeo.
+    for nombre in diagnostics._REQUIRED_MODULES:
+        monkeypatch.setitem(sys.modules, nombre, importlib.import_module(nombre))
     monkeypatch.setattr(diagnostics.importlib.util, "find_spec", lambda _: None)
     return settings
 
