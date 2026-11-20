@@ -1,0 +1,33 @@
+{
+  "axis": "security",
+  "gates": [
+    {
+      "id": "sec-secrets",
+      "cmd": "gitleaks detect --no-banner --redact --exit-code 1",
+      "expect": { "exit": 0 },
+      "severity": "blocker",
+      "weight": 35,
+      "when": ["**/*"],
+      "timeout": 180
+    },
+    {
+      "id": "sec-deps",
+      "cmd": "osv-scanner --lockfile={lockfile} --format=json",
+      "expect": { "exit": 0, "json": { "path": "results", "max": 0 } },
+      "severity": "blocker",
+      "weight": 40,
+      "when": ["**/package-lock.json", "**/poetry.lock", "**/Cargo.lock", "**/go.sum"],
+      "timeout": 300
+    },
+    {
+      "id": "sec-sast",
+      "cmd": "semgrep --config=auto --error --sarif --output={artifact}",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 25,
+      "when": ["**/*.{js,ts,jsx,tsx,py,go,rs,rb,java}"],
+      "artifact": "sast.sarif",
+      "timeout": 600
+    }
+  ]
+}

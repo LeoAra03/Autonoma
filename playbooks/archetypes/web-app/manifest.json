@@ -1,0 +1,10 @@
+{
+  "id": "web-app",
+  "axis": "interaction",
+  "universal": false,
+  "when": ["*web*"],
+  "stages": ["S2", "S3", "S4"],
+  "briefs": [
+    "Do an interaction pass on the app: run the accessibility checker against a running instance and fix every violation it reports — contrast, keyboard reach, form labels, focus order. Keyboard paths must work end to end, not just for mouse users."
+  ]
+}

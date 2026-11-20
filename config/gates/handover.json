@@ -1,0 +1,23 @@
+{
+  "axis": "handover",
+  "gates": [
+    {
+      "id": "ho-files",
+      "cmd": "node tools/check-handover.mjs",
+      "expect": { "exit": 0 },
+      "severity": "blocker",
+      "weight": 60,
+      "when": ["**/*"],
+      "timeout": 120
+    },
+    {
+      "id": "ho-adr",
+      "cmd": "node tools/check-adr.mjs --min=3",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 40,
+      "when": ["docs/ADR/*.md"],
+      "timeout": 60
+    }
+  ]
+}

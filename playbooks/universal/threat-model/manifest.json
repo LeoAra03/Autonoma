@@ -1,0 +1,10 @@
+{
+  "id": "threat-model",
+  "axis": "safety",
+  "universal": true,
+  "stages": ["S3", "S4"],
+  "briefs": [
+    "Write down the threats this project faces and how it responds to them: what an attacker could try, what the project does to make it harder, and what the remaining risks are. Keep it honest — a threat model with no real risks in it is just marketing.",
+    "Keep the risk register next to the model and update both whenever the project changes behaviour that affects the risk picture."
+  ]
+}

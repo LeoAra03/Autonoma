@@ -1,0 +1,11 @@
+{
+  "id": "data",
+  "axis": "safety",
+  "universal": false,
+  "when": ["*data*", "*python*"],
+  "stages": ["S2", "S3", "S4"],
+  "briefs": [
+    "Put data quality guards in place: validate inputs at the boundary, check schemas before writing, and make failed loads fail loudly instead of silently writing partial results.",
+    "Document the data: where it comes from, how it is transformed, where it goes, and how to back it up and restore it. A pipeline nobody can explain is a pipeline nobody can recover."
+  ]
+}

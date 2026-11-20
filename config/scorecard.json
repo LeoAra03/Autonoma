@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "tolerance": 0,
+  "axes": {
+    "security": 15,
+    "reliability": 12,
+    "functional": 12,
+    "maintainability": 11,
+    "performance": 9,
+    "interaction": 9,
+    "supplychain": 8,
+    "flexibility": 8,
+    "safety": 6,
+    "compatibility": 5,
+    "handover": 5
+  }
+}

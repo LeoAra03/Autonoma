@@ -1,0 +1,23 @@
+{
+  "axis": "maintainability",
+  "gates": [
+    {
+      "id": "mnt-lint",
+      "cmd": "npm run lint --silent",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 50,
+      "when": ["package.json"],
+      "timeout": 600
+    },
+    {
+      "id": "mnt-complexity",
+      "cmd": "node tools/complexity.mjs --max=20",
+      "expect": { "exit": 0 },
+      "severity": "minor",
+      "weight": 50,
+      "when": ["**/*.js", "**/*.ts"],
+      "timeout": 300
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "order": ["S0", "S1", "S2", "S3", "S4"],
+  "floors": {
+    "S1": { "functional": 20, "reliability": 30, "maintainability": 20, "handover": 10 },
+    "S2": { "functional": 50, "reliability": 50, "security": 40, "maintainability": 40, "flexibility": 40, "handover": 25 },
+    "S3": { "functional": 70, "reliability": 75, "security": 70, "performance": 60, "interaction": 60, "supplychain": 60, "maintainability": 65, "flexibility": 55, "handover": 50 },
+    "S4": { "functional": 85, "reliability": 90, "security": 90, "performance": 85, "interaction": 85, "supplychain": 85, "maintainability": 85, "flexibility": 80, "compatibility": 75, "safety": 75, "handover": 90 }
+  }
+}
