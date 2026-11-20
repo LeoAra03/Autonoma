@@ -185,7 +185,7 @@ function Send-WorkItem {
     if ($Item.kind -eq 'audit') {
         $text = New-AuditPrompt -Cycle $state.cycle -Title $Item.title `
             -Brief 'Sweep the project for whatever breaks the result. Fix each finding with its own commit, run the gates, record the counts.' `
-            -Footer (New-Contract -Criterion 'no findings and gates green' -Config $Config)
+            -Footer (New-Contract -Criterion 'no findings and gates green')
         $chunks = Split-Prompt -Text $text -Max $max
         return (Send-Chunks -Context $Context -Config $Config -Chunks $chunks -Pending ($Item.id + '|1') -Part 1 -Total 0)
     }
@@ -197,7 +197,7 @@ function Send-WorkItem {
 
     $body = if ($total -gt 0 -and $part -le $total) { Get-BriefBody -PlanPath $Config.planPath -PhaseId $phase.id -Index $part } else { '' }
     $pass = if ($state.passes.ContainsKey($phase.id)) { [int]$state.passes[$phase.id] } else { 0 }
-    $footer = New-Contract -Criterion $phase.criterion -Config $Config
+    $footer = New-Contract -Criterion $phase.criterion
 
     $text = New-PhasePrompt -Phase $phase -Part $part -Total $total -Body $body -Pass $pass `
         -DeepRetries (Get-Cfg $Config 'limits.deepRetries' 8) `

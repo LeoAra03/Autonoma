@@ -1,5 +1,5 @@
 function New-Contract {
-    param([string]$Criterion, [hashtable]$Config)
+    param([string]$Criterion)
 
     $lines = @(
         'EXIT CONTRACT (mandatory, on its own lines, at the end):',

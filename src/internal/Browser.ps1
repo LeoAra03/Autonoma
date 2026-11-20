@@ -26,16 +26,16 @@ function Start-Browser {
     $exe = Find-Browser -Channel (Get-Cfg $Config 'browser.channel' 'auto')
     if (-not $exe) { Write-Log 'no chromium browser found; pass -Browser <path>' 'error'; return $false }
 
-    $args = @(
+    $browserArgs = @(
         '--remote-debugging-port=' + $Config.port, '--remote-allow-origins=*',
         '--no-first-run', '--no-default-browser-check', '--user-data-dir=' + $Config.browser.profile
     )
-    if (Get-Cfg $Config 'browser.headless' $false) { $args += '--headless=new' }
-    foreach ($extra in @(Get-Cfg $Config 'browser.args' @())) { if ($extra) { $args += $extra } }
-    $args += $Config.url
+    if (Get-Cfg $Config 'browser.headless' $false) { $browserArgs += '--headless=new' }
+    foreach ($extra in @(Get-Cfg $Config 'browser.args' @())) { if ($extra) { $browserArgs += $extra } }
+    $browserArgs += $Config.url
 
     Write-Log ('launching ' + (Split-Path -Leaf $exe) + ' on port ' + $Config.port)
-    Start-Process -FilePath $exe -ArgumentList $args
+    Start-Process -FilePath $exe -ArgumentList $browserArgs
     return $true
 }
 
