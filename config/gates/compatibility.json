@@ -1,0 +1,23 @@
+{
+  "axis": "compatibility",
+  "gates": [
+    {
+      "id": "cmp-engines",
+      "cmd": "node tools/check-engines.mjs",
+      "expect": { "exit": 0 },
+      "severity": "minor",
+      "weight": 50,
+      "when": ["package.json"],
+      "timeout": 60
+    },
+    {
+      "id": "cmp-lockfile",
+      "cmd": "node tools/check-lockfile.mjs",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 50,
+      "when": ["package.json"],
+      "timeout": 60
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "ci",
+  "axis": "supplychain",
+  "universal": true,
+  "stages": ["S2", "S3", "S4"],
+  "briefs": [
+    "Wire up continuous integration so the full self-check runs on every push and pull request: install the test and analysis tooling, then run the project's verify script as a single job that fails on any red.",
+    "Make failures readable — a CI run that only says \"something went wrong\" wastes everyone's time. Once it is green, run it again on a clean runner to prove it does not depend on local state."
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "axis": "safety",
+  "gates": [
+    {
+      "id": "saf-error-paths",
+      "cmd": "node tools/check-error-handling.mjs",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 60,
+      "when": ["**/*.{js,ts}"],
+      "timeout": 300
+    },
+    {
+      "id": "saf-backup",
+      "cmd": "node tools/check-restore.mjs --file=docs/RUNBOOK.md",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 40,
+      "when": ["docs/RUNBOOK.md"],
+      "timeout": 120
+    }
+  ]
+}

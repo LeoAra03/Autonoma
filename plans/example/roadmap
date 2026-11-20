@@ -1,0 +1,11 @@
+# id|axis|depends|type|title|criterion
+SEC-01|security||PLAYBOOK|secrets|no secrets in the tree and the gitleaks gate passes
+LIC-01|handover|SEC-01|PLAYBOOK|license|LICENSE present and compatible with bundled assets
+RDM-01|handover|LIC-01|PLAYBOOK|readme|README explains what it is, how to install and how to use it
+CI-01|supplychain|RDM-01|PLAYBOOK|ci|CI runs the full verify pipeline on every push
+TST-01|reliability|CI-01|PLAYBOOK|tests|test runner wired and the suite is green
+BLD-01|functional|TST-01|PLAYBOOK|build|a clean checkout builds and runs from scratch
+DOC-01|handover|BLD-01|PLAYBOOK|runbook|runbook and operations docs exist and are accurate
+TM-01|safety|DOC-01|PLAYBOOK|threat-model|threat model and risk register are written down
+HR-01|handover|TM-01|PLAYBOOK|handover|the full handover bundle is complete
+A1|audit|HR-01|AUDIT|form sweep|no findings

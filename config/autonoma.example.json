@@ -1,0 +1,39 @@
+{
+  "url": "https://example.com/chat/1",
+  "site": "generic",
+  "port": 9222,
+  "plan": "plans/example/roadmap",
+  "targetStage": "S4",
+  "seco": false,
+  "beep": true,
+  "browser": {
+    "channel": "auto",
+    "profile": "",
+    "headless": false,
+    "args": []
+  },
+  "timing": {
+    "quiet": 10,
+    "poll": 3,
+    "watchdog": 8,
+    "captchaGrace": 60,
+    "verdictForce": 5,
+    "sendSettle": 1600
+  },
+  "limits": {
+    "turns": 0,
+    "cards": 40,
+    "redsPerPhase": 3,
+    "deepRetries": 8,
+    "cleanAudits": 3,
+    "maxPromptChars": 9000,
+    "chunkDelay": 1200,
+    "wallMinutes": 0,
+    "maxRegressions": 3,
+    "rollbackOnRegression": true
+  },
+  "contract": {
+    "header": true
+  },
+  "audits": ["form sweep", "route sweep", "evidence sweep"]
+}

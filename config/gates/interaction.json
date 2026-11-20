@@ -1,0 +1,24 @@
+{
+  "axis": "interaction",
+  "gates": [
+    {
+      "id": "ux-axe",
+      "cmd": "npx --yes @axe-core/cli http://localhost:3000 --exit",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 60,
+      "when": ["**/*.html", "**/*.tsx", "**/*.jsx"],
+      "artifact": "axe.json",
+      "timeout": 300
+    },
+    {
+      "id": "ux-docs",
+      "cmd": "node tools/check-doc-sections.mjs --file=README.md --require=install,usage",
+      "expect": { "exit": 0 },
+      "severity": "minor",
+      "weight": 40,
+      "when": ["README.md"],
+      "timeout": 60
+    }
+  ]
+}

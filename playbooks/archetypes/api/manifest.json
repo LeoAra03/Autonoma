@@ -1,0 +1,11 @@
+{
+  "id": "api",
+  "axis": "functional",
+  "universal": false,
+  "when": ["*node*", "*python*", "*go*", "*rust*", "*dotnet*"],
+  "stages": ["S2", "S3", "S4"],
+  "briefs": [
+    "Define the API contract and test it: endpoints, methods, status codes, and the shape of error responses. Add a health endpoint that reflects the real state of the service, so monitoring can actually detect a broken dependency.",
+    "Make error handling deliberate: every failure path returns a meaningful status and message, and no request can hang forever. Authentication and authorization must be checked on every route, not just the ones that looked sensitive."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "tests",
+  "axis": "reliability",
+  "universal": true,
+  "stages": ["S1", "S2", "S3", "S4"],
+  "briefs": [
+    "Make sure the project has a real test runner and that the suite runs and passes. Tests must assert behaviour, not exist to make a gate green.",
+    "If there is no runner yet, introduce the smallest one that fits the stack and port the most important behaviours into it first. A green suite with no tests is worse than no suite — it teaches people to trust a gate that checks nothing."
+  ]
+}

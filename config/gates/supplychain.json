@@ -1,0 +1,24 @@
+{
+  "axis": "supplychain",
+  "gates": [
+    {
+      "id": "sc-sbom",
+      "cmd": "syft dir:. -o cyclonedx-json={artifact}",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 50,
+      "when": ["**/*"],
+      "artifact": "sbom.cdx.json",
+      "timeout": 600
+    },
+    {
+      "id": "sc-provenance",
+      "cmd": "node tools/check-provenance.mjs --min-level=2",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 50,
+      "when": [".github/workflows/*.yml"],
+      "timeout": 120
+    }
+  ]
+}

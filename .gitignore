@@ -1,0 +1,17 @@
+# Local configuration (never commit real URLs or plans)
+config/autonoma.json
+
+# Generated plans
+plans/discovered-*/
+
+# Runtime state
+state/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store

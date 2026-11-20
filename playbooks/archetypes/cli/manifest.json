@@ -1,0 +1,11 @@
+{
+  "id": "cli",
+  "axis": "functional",
+  "universal": false,
+  "when": ["*cli*"],
+  "stages": ["S1", "S2", "S3"],
+  "briefs": [
+    "Define the CLI contract: every flag, its meaning and its default, plus --help output that actually matches the implementation. Exit codes must be meaningful and documented — zero on success, non-zero on failure, with a consistent meaning for each code.",
+    "Make sure failures fail loudly. A CLI that prints a stack trace and exits zero is worse than one that crashes: scripts downstream will trust it and do the wrong thing."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "license",
+  "axis": "handover",
+  "universal": true,
+  "stages": ["S1", "S2", "S3", "S4"],
+  "briefs": [
+    "Add a LICENSE file that matches the license the project actually uses, and verify that every third-party asset in the tree — code copied from elsewhere, bundled fonts, icons, data files, generated assets — is compatible with it.",
+    "Record each third-party piece (name, version, license) in a NOTICE file. If a dependency's license is incompatible, stop and report it: license problems are not something to paper over."
+  ]
+}

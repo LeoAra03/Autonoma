@@ -1,0 +1,24 @@
+{
+  "axis": "performance",
+  "gates": [
+    {
+      "id": "perf-budget",
+      "cmd": "node tools/perf-budget.mjs --budget=config/perf-budget.json",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 60,
+      "when": ["package.json"],
+      "artifact": "perf.json",
+      "timeout": 600
+    },
+    {
+      "id": "perf-bundle",
+      "cmd": "node tools/bundle-size.mjs --max=250000",
+      "expect": { "exit": 0 },
+      "severity": "minor",
+      "weight": 40,
+      "when": ["package.json"],
+      "timeout": 300
+    }
+  ]
+}

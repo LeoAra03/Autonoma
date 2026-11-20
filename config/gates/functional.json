@@ -1,0 +1,23 @@
+{
+  "axis": "functional",
+  "gates": [
+    {
+      "id": "fun-build",
+      "cmd": "npm run build --silent",
+      "expect": { "exit": 0 },
+      "severity": "blocker",
+      "weight": 50,
+      "when": ["package.json"],
+      "timeout": 900
+    },
+    {
+      "id": "fun-coverage",
+      "cmd": "node tools/coverage-floor.mjs --min=60",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 50,
+      "when": ["**/*.js", "**/*.ts"],
+      "timeout": 300
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "axis": "flexibility",
+  "gates": [
+    {
+      "id": "flx-clean-install",
+      "cmd": "node tools/clean-install.mjs",
+      "expect": { "exit": 0 },
+      "severity": "blocker",
+      "weight": 50,
+      "when": ["package.json"],
+      "timeout": 900
+    },
+    {
+      "id": "flx-absolute-paths",
+      "cmd": "node tools/no-absolute-paths.mjs",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 50,
+      "when": ["**/*.{js,ts,json}"],
+      "timeout": 120
+    }
+  ]
+}

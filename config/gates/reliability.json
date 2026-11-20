@@ -1,0 +1,23 @@
+{
+  "axis": "reliability",
+  "gates": [
+    {
+      "id": "rel-tests",
+      "cmd": "npm test --silent",
+      "expect": { "exit": 0 },
+      "severity": "blocker",
+      "weight": 60,
+      "when": ["package.json"],
+      "timeout": 900
+    },
+    {
+      "id": "rel-flake",
+      "cmd": "npm test --silent -- --runInBand --retry=2",
+      "expect": { "exit": 0 },
+      "severity": "major",
+      "weight": 40,
+      "when": ["package.json"],
+      "timeout": 900
+    }
+  ]
+}

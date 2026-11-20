@@ -1,0 +1,11 @@
+{
+  "id": "library",
+  "axis": "functional",
+  "universal": false,
+  "when": ["*node*", "*python*", "*go*", "*rust*", "*dotnet*"],
+  "stages": ["S1", "S2", "S3", "S4"],
+  "briefs": [
+    "Define the public API surface and document it: what a consumer can import or call, what each function takes and returns, and what errors it throws. Everything that is not part of the public surface should be clearly internal.",
+    "Set up versioning and a changelog. A library that changes its contract without a version bump breaks every consumer at build time — usually far from the commit that caused it."
+  ]
+}

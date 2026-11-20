@@ -1,0 +1,10 @@
+{
+  "id": "runbook",
+  "axis": "handover",
+  "universal": true,
+  "stages": ["S3", "S4"],
+  "briefs": [
+    "Write the operational docs a teammate would need at 2 a.m.: how to start, stop, monitor and recover the project, including backup and restore steps.",
+    "Every step must be something you actually executed, not something that sounds right. If a restore procedure has never been run, write it, run it, and correct the document until the run matches the page."
+  ]
+}
