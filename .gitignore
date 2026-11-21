@@ -15,3 +15,8 @@ state/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+verify.log
+artifacts/
+ledger.jsonl
+config/autonoma.json

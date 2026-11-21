@@ -10,28 +10,46 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
+    name: verify
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: modules
+      - uses: actions/checkout@v5
+      - name: Install analyzer and test modules
         shell: pwsh
         run: |
           Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-      - name: verify
+      - name: Verify
         shell: pwsh
         run: |
-          ./tools/verify.ps1 2>&1 | Tee-Object -FilePath verify.log | Out-Host
-      - name: attest verification log
+          $code = 0
+          try {
+            ./tools/verify.ps1 *>&1 | Tee-Object -FilePath verify.log
+            $code =$LASTEXITCODE
+          } catch {
+            $_ \vert{} Out-String \vert{} Tee-Object -FilePath verify.log -Append$code = 1
+          }
+          if (-not (Test-Path -LiteralPath 'verify.log')) {
+            'verify.ps1 produced no log' | Set-Content -LiteralPath 'verify.log'
+            $code = 1
+          }
+          exit $code
+      - name: Upload verification log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: verify-log
           path: verify.log
-      - name: attest provenance
-        if: always()
+          if-no-files-found: warn
+      - name: Attest provenance
+        if: always() && hashFiles('verify.log') != ''
         uses: actions/attest@v2
         with:
-          artifact-path: verify.log
+          subject-path: verify.log
