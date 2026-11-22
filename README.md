@@ -1,8 +1,12 @@
 # Autonoma
 
-[![CI](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml/badge.svg)](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml)
+[![ci](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml)
+[![powershell](https://img.shields.io/badge/powershell-5.1%20%7C%207%2B-blue)](https://github.com/LeoAra03/Autonoma)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/LeoAra03/Autonoma/blob/main/LICENSE)
 
 **A deterministic work director.** Autonoma takes a repository from *"written in one day"* to *"handed over to a team"* by running a measured ladder of quality stages — and refusing to advance on self-reported progress.
+
+**What it is and what it is not:** This is a deterministic work director with external gates, not an autonomous agent. It does not generate code or call any LLM API—it drives another agent (human or model) through a plan and advances only when external CLI commands exit zero. Requires Windows and a Chromium-based browser; does not run on Linux.
 
 It drives a web chat agent through a dependency-ordered plan of engineering work. The director does not need to understand the code: it needs to **compare numbers and count**. The agent on the other end can be anything that can type — a human, an LLM, or a mix of both.
 
@@ -132,6 +136,8 @@ The browser runs in an isolated profile under `%LOCALAPPDATA%\Autonoma\profile`.
 - *"Legal"* means license compatibility and CVE checks, not legal advice.
 - If the stack has no runner, the first playbook builds one. No runner, no gates, no ladder.
 - The model can still lie. That is exactly why the gates are external and the ledger is chained.
+- Depends on the target web interface DOM: a site layout redesign breaks selectors until updated.
+- The hash-chained ledger detects manual tampering, not full git history rewrites via force push.
 
 ## License
 
