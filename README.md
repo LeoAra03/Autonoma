@@ -1,16 +1,21 @@
 # Autonoma
 
-[![ci](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml)
-[![powershell](https://img.shields.io/badge/powershell-5.1%20%7C%207%2B-blue)](https://github.com/LeoAra03/Autonoma)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/LeoAra03/Autonoma/blob/main/LICENSE)
+![ci](https://github.com/LeoAra03/Autonoma/actions/workflows/ci.yml/badge.svg?branch=main&labelColor=111A2B)
+![license](https://img.shields.io/badge/license-MIT-22D3EE?style=flat-square&labelColor=111A2B)
 
-**A deterministic work director.** Autonoma takes a repository from *"written in one day"* to *"handed over to a team"* by running a measured ladder of quality stages — and refusing to advance on self-reported progress.
+**Delivery governance with external gates.** Autonoma drives an agent through a dependency-ordered plan and only lets it advance when external commands exit zero. The agent never grades its own task, and every verdict is written to a hash-chained ledger.
 
-**What it is and what it is not:** This is a deterministic work director with external gates, not an autonomous agent. It does not generate code or call any LLM API—it drives another agent (human or model) through a plan and advances only when external CLI commands exit zero. Requires Windows and a Chromium-based browser; does not run on Linux.
+## Why it exists
+Long infrastructure refactors die from two things: nobody defines "better", and the worker grades their own homework. Autonoma fixes both.
 
-It drives a web chat agent through a dependency-ordered plan of engineering work. The director does not need to understand the code: it needs to **compare numbers and count**. The agent on the other end can be anything that can type — a human, an LLM, or a mix of both.
+- **"Better" is defined, not felt.** The scorecard covers the nine characteristics of ISO/IEC 25010:2023 plus the five Azure Well-Architected pillars, supply chain and handover.
+- **The grade comes from outside.** A gate exits zero or it does not. The agent claims; the gates decide.
+- **Skipped gates never count as passes.** No `osv-scanner` and you cannot claim S3.
+- **Failures are machine-readable.** `--emit-sarif` writes every failed gate as a SARIF result.
+- **The ledger is a hash chain.** Hand-editing a green visibly breaks `--verify-ledger`.
 
-There is no LLM inside Autonoma. It never grades its own homework: every claim is checked by external command-line gates, and every verdict is written to a chained, tamper-evident ledger.
+## What it is and what it is not
+A deterministic director with external gates, not an autonomous agent. No LLM inside, no API cost. Drives another agent. Windows and Linux (PowerShell 7).
 
 ---
 

@@ -5,6 +5,26 @@ All notable changes to Autonoma are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-22
+
+### Added
+
+- **Delivery governance framing**: README repositioned as infrastructure automation with external
+  verification and supply-chain evidence; ISO/IEC 25010:2023 plus the five Azure Well-Architected
+  pillars on one scorecard.
+- **docs/frameworks.md**: axis-to-framework mapping with the rule that an axis without a mapping
+  does not count toward framework conformance.
+- **docs/ai-workflow.md**: rejection log for proposed-but-declined work (LLM self-grading, embedded
+  heuristics, `--emit-sarif`, `verify.ps1 -Platform`).
+- **demo.ps1 / demo.sh**: entry points to run the self-check on Windows PowerShell and Linux pwsh.
+- **CONTRIBUTIONS.md**: extended with cross-platform notes (`-Platform`, `--emit-sarif`, pwsh on
+  Linux).
+
+### Changed
+
+- README top block now covers purpose, "Why it exists", "What it is and what it is not" and the
+  two-framework scorecard; badges updated.
+
 ## [1.0.0] - 2026-11-20
 
 ### Added
